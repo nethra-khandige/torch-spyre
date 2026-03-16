@@ -21,8 +21,10 @@ from utils_inductor import (
     cached_randn,
     make_param_dict,
     unique_randn_along_dim,
+    compare,
+    compare_with_cpu,
+    _compile_and_run,
 )
-from utils_inductor import compare, compare_with_cpu
 
 POINTWISE_UNARY_OPS_DICT = {
     "abs": torch.abs,
@@ -1031,6 +1033,41 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             }
         },
+        (
+            "test_mixed_dtype_binary_op",
+            "test_mixed_dtype_binary_op_cpu",
+        ): {
+            "ops_dict": POINTWISE_BINARY_OPS_DICT,
+            "param_sets": {
+                # fp32 + fp16 (cast fp16 → fp32)
+                "fp32_fp16_1d": (
+                    cached_randn((256,), dtype=torch.float32),
+                    cached_randn((256,), dtype=torch.float16),
+                ),
+                "fp32_fp16_2d": (
+                    cached_randn((67, 256), dtype=torch.float32),
+                    cached_randn((67, 256), dtype=torch.float16),
+                ),
+                "fp32_fp16_3d": (
+                    cached_randn((67, 71, 256), dtype=torch.float32),
+                    cached_randn((67, 71, 256), dtype=torch.float16),
+                ),
+            },
+        },
+        ("test_dtype_convenience_methods", "test_dtype_convenience_cpu"): {
+            "param_sets": {
+                "half_1d": (cached_randn((256,), dtype=torch.float32), torch.float16),
+                "half_2d": (
+                    cached_randn((67, 256), dtype=torch.float32),
+                    torch.float16,
+                ),
+                "float_1d": (cached_randn((256,), dtype=torch.float16), torch.float32),
+                "float_2d": (
+                    cached_randn((67, 256), dtype=torch.float16),
+                    torch.float32,
+                ),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -1291,6 +1328,38 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         output = compiled(64.0, device="spyre")
 
         _ = output.cpu()
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_mixed_dtype_binary_op_cpu(self, op, a, b):
+        # tests binary ops for mixed dtype
+        # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
+        if op == torch.div:
+            pytest.skip(
+                "div excluded for mixed dtype — Division by 0 or near-zero differs on Spyre from CPU, sidestep for now."
+            )
+
+        expected_dtype = torch.result_type(a, b)
+        target = _compile_and_run(op, (a, b), device=torch.device("spyre"))
+
+        # dtype check
+        self.assertEqual(
+            target.dtype,
+            expected_dtype,
+            f"dtype mismatch: got {target.dtype}, expected {expected_dtype}",
+        )
+        compare_with_cpu(
+            op, a, b, atol=FP16_EPS * 10, rtol=FP16_EPS * 10, target=target
+        )
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_dtype_convenience_cpu(self, x, target_dtype):
+        # tests .half() and .float() convenience methods specifically
+        def fn(x):
+            return x.half() if target_dtype == torch.float16 else x.float()
+
+        target = _compile_and_run(fn, (x,), device=torch.device("spyre"))
+        self.assertEqual(target.dtype, target_dtype)
+        compare_with_cpu(fn, x, atol=FP16_EPS, rtol=FP16_EPS, target=target)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from torch._inductor.pattern_matcher import (
 )
 
 aten = torch.ops.aten
+import torch.fx
 
 
 def relayout_linear_weights(graph: torch.fx.Graph) -> None:
@@ -312,3 +313,52 @@ def replace_scalar_with_tensor(graph: torch.fx.Graph) -> None:
                         )
                         const_node_map[scalar_val] = full_node
                     node.update_arg(idx, full_node)
+
+
+def get_node_dtype(node: torch.fx.Node):
+    """
+    Return the expected output dtype of this node (used as the cast target).
+    """
+    val = node.meta.get("val", None)
+    if isinstance(val, torch.Tensor):
+        return val.dtype
+    return None
+
+
+def insert_dtype_casts(graph: torch.fx.Graph) -> None:
+    """
+    FX graph pass that inserts explicit CPU dtype casts before any op whose
+    tensor inputs have mismatched dtypes.
+    """
+    for node in list(graph.nodes):
+        if node.op != "call_function":
+            continue
+        # Get the result dtype
+        target_dtype = get_node_dtype(node)
+        if target_dtype is None:
+            continue
+
+        # Collect tensor args with mismatched dtypes
+        mismatched = []
+        for i, arg in enumerate(node.args):
+            if not isinstance(arg, torch.fx.Node):
+                continue
+            # Get the dtype of input tensors
+            src_dtype = get_node_dtype(arg)
+            if src_dtype is not None and src_dtype != target_dtype:
+                mismatched.append((i, arg, src_dtype))
+
+        if not mismatched:
+            continue
+
+        with graph.inserting_before(node):
+            for i, arg, src_dtype in mismatched:
+                cast_node = graph.call_function(
+                    torch.ops.aten.to.dtype,
+                    args=(arg, target_dtype),
+                )
+                cast_node.name = graph._graph_namespace.create_name(
+                    f"cpu_cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}", None
+                )
+                node.update_arg(i, cast_node)
+    graph.lint()
