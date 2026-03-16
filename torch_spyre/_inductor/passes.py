@@ -29,6 +29,7 @@ from .temp_passes import (
     mm_to_bmm_pass,
     relayout_linear_weights,
     replace_scalar_with_tensor,
+    insert_dtype_casts,
 )
 from .stickify import propagate_spyre_tensor_layouts
 from .core_division import core_division_planning
@@ -57,7 +58,7 @@ class CustomPrePasses(CustomGraphPass):
     """
     The list of custom passes to run
     """
-    passes: List[Callable[[torch.fx.graph.Graph], None]] = []
+    passes: List[Callable[[torch.fx.graph.Graph], None]] = [insert_dtype_casts]
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         for p in CustomPrePasses.passes:
