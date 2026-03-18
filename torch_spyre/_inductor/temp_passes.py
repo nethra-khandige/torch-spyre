@@ -18,6 +18,7 @@ from typing import cast
 import torch
 import torch.fx
 
+
 def relayout_linear_weights(graph: torch.fx.Graph) -> None:
     """
     Transpose and realize nn.Linear weights so that they are compatible
@@ -128,12 +129,14 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
         if not mismatched:
             continue
 
-        with graph.inserting_before(node): 
+        with graph.inserting_before(node):
             for i, arg, src_dtype in mismatched:
                 cast_node = graph.call_function(
-                        torch.ops.aten.to.dtype,
-                        args=(arg, target_dtype),
-                    )
-                cast_node.name = graph._graph_namespace.create_name(f"cpu_cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}",None)
+                    torch.ops.aten.to.dtype,
+                    args=(arg, target_dtype),
+                )
+                cast_node.name = graph._graph_namespace.create_name(
+                    f"cpu_cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}", None
+                )
                 node.update_arg(i, cast_node)
     graph.lint()
