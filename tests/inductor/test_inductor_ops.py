@@ -952,7 +952,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        ("test_dtype_convenience_methods", "test_dtype_convenience_cpu"): {  # ← different base
+        ("test_dtype_convenience_methods", "test_dtype_convenience_cpu"): { 
             "param_sets": {
                 "half_1d": (cached_randn((256,), dtype=torch.float32), torch.float16),
                 "half_2d": (cached_randn((67, 256), dtype=torch.float32), torch.float16),
@@ -1194,6 +1194,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_mixed_dtype_binary_op_cpu(self, op, a, b):
         # tests binary ops for mixed dtype
+        # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
         if op == torch.div:
             pytest.skip("div excluded for mixed dtype — Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.")
         
