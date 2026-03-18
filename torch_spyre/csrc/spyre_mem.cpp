@@ -675,23 +675,23 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
       "Spyre backend does not support type conversion yet during copy.");
 
   if (self.is_cpu() && dst.is_privateuseone()) {
-    if (src.dim() == 0) {
-      at::Tensor tmp_tensor = src.reshape({1});
+    if (self.dim() == 0) {
+      at::Tensor tmp_tensor = self.reshape({1});
       copy_host_to_device(tmp_tensor, dst);
     } else {
-      copy_host_to_device(src, dst);
+      copy_host_to_device(self, dst);
     }
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_cpu()) {
-    copy_device_to_host(src, dst);
+    copy_device_to_host(self, dst);
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_privateuseone()) {
     // Copy from Spyre to Spyre
     // FIXME: This will need to be addressed for proper spyre to spyre copy
     source_storage =
-        (static_cast<SpyreTensorImpl*>(src.unsafeGetTensorImpl()))->storage();
+        (static_cast<SpyreTensorImpl*>(self.unsafeGetTensorImpl()))->storage();
     dest_storage =
         (static_cast<SpyreTensorImpl*>(dst.unsafeGetTensorImpl()))->storage();
     DEBUGINFO("Copying", source_storage.nbytes(), "bytes from",
@@ -702,7 +702,7 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
     return dst;
   } else {
     // For all other cases fallback to the upstream implementation
-    return at::_copy_from(src, dst, non_blocking);
+    return at::_copy_from(self, dst, non_blocking);
   }
 }
 
