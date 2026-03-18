@@ -179,15 +179,12 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
         if not mismatched:
             continue
 
-        with graph.inserting_before(node):
+        with graph.inserting_before(node): 
             for i, arg, src_dtype in mismatched:
                 cast_node = graph.call_function(
                         torch.ops.aten.to.dtype,
                         args=(arg, target_dtype),
                     )
-                # Propagate fake tensor metadata
-                if "val" in arg.meta:
-                    cast_node.meta["val"] = arg.meta["val"].to(
-                        dtype=target_dtype)
-                cast_node.name = graph._graph_namespace.create_name(f"cpu_cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}",None) # this helps with clashing node names
+                cast_node.name = graph._graph_namespace.create_name(f"cpu_cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}",None)
                 node.update_arg(i, cast_node)
+    graph.lint()

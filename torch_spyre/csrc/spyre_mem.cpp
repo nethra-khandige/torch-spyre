@@ -670,11 +670,9 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
   at::Storage dest_storage;
 
   // TODO(tmhoangt): add type conversion node
-  // TORCH_CHECK(
-  //     self.scalar_type() == dst.scalar_type(),
-  //     "Spyre backend does not support type conversion yet during copy.");
-  bool needs_cast = (self.scalar_type() != dst.scalar_type());
-  at::Tensor src = needs_cast ? self.to(dst.scalar_type()) : self;
+  TORCH_CHECK(
+      self.scalar_type() == dst.scalar_type(),
+      "Spyre backend does not support type conversion yet during copy.");
 
   if (self.is_cpu() && dst.is_privateuseone()) {
     if (src.dim() == 0) {
