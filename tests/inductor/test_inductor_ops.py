@@ -1227,6 +1227,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         # tests .half() and .float() convenience methods specifically
         def fn(x):
             return x.half() if target_dtype == torch.float16 else x.float()
+
         target = _compile_and_run(fn, (x,), device=torch.device("spyre"))
         self.assertEqual(target.dtype, target_dtype)
         compare_with_cpu(fn, x, atol=FP16_EPS, rtol=FP16_EPS, target=target)
