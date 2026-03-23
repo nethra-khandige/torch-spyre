@@ -248,3 +248,16 @@ def _ones_scalar_fake(
     dtype: Optional[torch.dtype] = None,
 ):
     return torch.empty(1, dtype=dtype, device="spyre")
+
+
+@torch.library.custom_op("spyre::cpu_dtype_cast", mutates_args=(), device_types="spyre")
+def _cpu_dtype_cast(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Custom op to do type conversion on CPU
+    TODO: Develop type conversion as a Spyre operator and avoid CPU fallback:
+    https://github.com/torch-spyre/torch-spyre/issues/1153"""
+    return tensor.cpu().to(dtype=dtype).to(tensor.device)
+
+
+@_cpu_dtype_cast.register_fake
+def _(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    return tensor.to(dtype=dtype)

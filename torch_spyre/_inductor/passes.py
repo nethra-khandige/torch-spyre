@@ -58,7 +58,7 @@ class CustomPrePasses(CustomGraphPass):
     """
     The list of custom passes to run
     """
-    passes: List[Callable[[torch.fx.graph.Graph], None]] = [insert_dtype_casts]
+    passes: List[Callable[[torch.fx.graph.Graph], None]] = []
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         for p in CustomPrePasses.passes:
@@ -83,6 +83,7 @@ class CustomPostPasses(CustomGraphPass):
         relayout_linear_weights,
         mm_to_bmm_pass.apply,
         bmm_unflatten_pass.apply,
+        insert_dtype_casts,
     ]
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
