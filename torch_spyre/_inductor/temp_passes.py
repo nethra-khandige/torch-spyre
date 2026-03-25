@@ -317,13 +317,25 @@ def replace_scalar_with_tensor(graph: torch.fx.Graph) -> None:
 
 def insert_dtype_casts(graph: torch.fx.Graph) -> None:
     """
-    Combined pass that:
+    A pass that:
     1. Detects mismatched dtype in nodes
     2. Inserts Spyre custom cast op (cpu_dtype_cast)
         node for type conversion except for bool dtype which
         has separate handling.
     TODO: To be revisted once https://github.com/torch-spyre/torch-spyre/issues/1153 resolved
     """
+    SDSC_SUPPORT = {
+        (torch.bool, torch.float16),
+        (torch.float16, torch.bool),
+    }
+    COMPARISON_OPS = {
+        torch.ops.aten.le.Tensor,
+        torch.ops.aten.ge.Tensor,
+        torch.ops.aten.lt.Tensor,
+        torch.ops.aten.gt.Tensor,
+        torch.ops.aten.eq.Tensor,
+        torch.ops.aten.ne.Tensor,
+    }
 
     def get_node_dtype(node: torch.fx.Node):
         val = node.meta.get("val", None)
@@ -331,16 +343,26 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
             return val.dtype
         return None
 
+    def get_cast_target_dtype(node: torch.fx.Node) -> torch.dtype | None:
+        """Dtype that inputs should be cast to.
+        For cmp ops, use non-bool input dtype instead of output dtype
+        fp16,bool --> fp16,fp16"""
+        if node.target in COMPARISON_OPS:
+            for arg in node.args:
+                if isinstance(arg, torch.fx.Node):
+                    dtype = get_node_dtype(arg)
+                    if dtype is not None and dtype != torch.bool:
+                        return dtype
+            return None
+        return get_node_dtype(node)
+
     for node in list(graph.nodes):
         if node.op != "call_function":
             continue
 
-        # Get the result dtype
-        target_dtype = get_node_dtype(node)
+        # Get the target dtype
+        target_dtype = get_cast_target_dtype(node)
         if target_dtype is None:
-            continue
-        # skip conversion for bool dtype
-        if target_dtype == torch.bool:
             continue
 
         mismatched = []
@@ -349,8 +371,12 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
                 continue
             # Get the dtype of input tensors
             src_dtype = get_node_dtype(arg)
-            # skip conversion for bool dtype
-            if src_dtype == torch.bool:
+
+            # Skip if float16 to bool conversion through convert_element_type
+            if (
+                node.target == torch.ops.prims.convert_element_type.default
+                and (src_dtype, target_dtype) in SDSC_SUPPORT
+            ):
                 continue
             if src_dtype is not None and src_dtype != target_dtype:
                 mismatched.append((i, arg, src_dtype))
@@ -360,6 +386,9 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
 
         with graph.inserting_before(node):
             for i, arg, src_dtype in mismatched:
+                # where operation does not need casting as first arg is cond
+                if node.target == torch.ops.aten.where.self and i == 0:
+                    continue
                 cast_node = graph.call_function(
                     torch.ops.spyre.cpu_dtype_cast.default,
                     args=(arg, target_dtype),
@@ -369,5 +398,10 @@ def insert_dtype_casts(graph: torch.fx.Graph) -> None:
                     f"cast_{arg.name}_to_{str(target_dtype).split('.')[-1]}", None
                 )
                 node.update_arg(i, cast_node)
+
+        # remove the redundant prims.convert_element_type
+        if node.target == torch.ops.prims.convert_element_type.default:
+            node.replace_all_uses_with(cast_node)
+            graph.erase_node(node)
 
     graph.lint()

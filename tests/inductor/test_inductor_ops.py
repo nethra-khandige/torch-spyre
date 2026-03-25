@@ -1460,6 +1460,25 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        (
+            "test_mixed_dtype_cmp_op",
+            "test_mixed_dtype_cmp_ops",
+        ): {
+            "ops_dict": {
+                "ge": torch.ge,
+                "le": torch.le,
+            },
+            "param_sets": {
+                "float16_bool_1d": (
+                    cached_randn((64,), dtype=torch.float16, scale=10.0),
+                    torch.randint(0, 2, (64,), dtype=torch.bool),
+                ),
+                "float16_bool_2d": (
+                    cached_randn((32, 64), dtype=torch.float16, scale=10.0),
+                    torch.randint(0, 2, (32, 64), dtype=torch.bool),
+                ),
+            },
+        },
         ("test_dtype_convenience_methods", "test_dtype_convenience_cpu"): {
             "param_sets": {
                 "half_1d": (cached_randn((256,), dtype=torch.float32), torch.float16),
@@ -2012,13 +2031,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_mixed_dtype_binary_op_cpu(self, op, a, b):
-        # tests binary ops for mixed dtype
-        # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
+        """Test binary ops for mixed dtype
+        TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now"""
         if op == torch.div:
             pytest.skip(
-                "div excluded for mixed dtype — Division by 0 or near-zero differs on Spyre from CPU, sidestep for now."
+                "div excluded for mixed dtype — Division by 0 or near-zero differs on Spyre from CPU,"
+                "sidestep for now."
             )
-
         expected_dtype = torch.result_type(a, b)
         target = _compile_and_run(op, (a, b), device=torch.device("spyre"))
 
@@ -2028,19 +2047,30 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             expected_dtype,
             f"dtype mismatch: got {target.dtype}, expected {expected_dtype}",
         )
-        compare_with_cpu(
-            op, a, b, atol=FP16_EPS * 10, rtol=FP16_EPS * 10, target=target
-        )
+        compare_with_cpu(op, a, b, target=target)
 
-    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_mixed_dtype_cmp_ops(self, op, a, b):
+        """Test comparison ops for mixed dtype"""
+        target = _compile_and_run(op, (a, b), device=torch.device("spyre"))
+        expected_dtype = torch.bool
+
+        # dtype check
+        self.assertEqual(
+            target.dtype,
+            expected_dtype,
+            f"dtype mismatch: got {target.dtype}, expected {expected_dtype}",
+        )
+        compare_with_cpu(op, a, b, target=target)
+
     def test_dtype_convenience_cpu(self, x, target_dtype):
-        # tests .half() and .float() convenience methods specifically
+        """Test .half() and .float() convenience methods specifically"""
+
         def fn(x):
             return x.half() if target_dtype == torch.float16 else x.float()
 
         target = _compile_and_run(fn, (x,), device=torch.device("spyre"))
         self.assertEqual(target.dtype, target_dtype)
-        compare_with_cpu(fn, x, atol=FP16_EPS, rtol=FP16_EPS, target=target)
+        compare_with_cpu(fn, x, target=target)
 
 
 if __name__ == "__main__":
