@@ -38,14 +38,14 @@ class SpyreTensorLayout {
    * The dimensions are in decreasing stride order with the stick dimension(s)
    * last.
    */
-  std::vector<int64_t> device_size;
+  std::vector<c10::SymInt> device_size;
 
   /**
    * Record the mapping from device dimensions to host strides.
    * It has len(device_size) entries whose values are offsets in the host tensor
    * memory.
    */
-  std::vector<int64_t> stride_map;
+  std::vector<c10::SymInt> stride_map;
 
   DataFormats device_dtype;
 
@@ -80,8 +80,8 @@ class SpyreTensorLayout {
    * device memory layout, but callers are responsible for ensuring
    * that all device layout invariants are satisfied.
    */
-  SpyreTensorLayout(std::vector<int64_t> device_size,
-                    std::vector<int64_t> stride_map, DataFormats device_dtype)
+  SpyreTensorLayout(std::vector<c10::SymInt> device_size,
+                    std::vector<c10::SymInt> stride_map, DataFormats device_dtype)
       : device_size(device_size),
         stride_map(stride_map),
         device_dtype(device_dtype) {}

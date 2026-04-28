@@ -99,24 +99,31 @@ static std::vector<int64_t> compute_host_stride(
   return host_stride;
 }
 
-static std::vector<int64_t> dim_map_to_stride_map(
+static std::vector<c10::SymInt> dim_map_to_stride_map(
     const std::vector<int32_t>& dim_map, const std::vector<int64_t>& host_size,
     const std::vector<int64_t>& host_stride,
-    const std::vector<int64_t>& device_size) {
+    const std::vector<c10::SymInt>& device_size) {
   int n = dim_map.size();
-  std::vector<int64_t> stride_map(n, -1);
+  std::vector<int64_t> stride_map_int64(n, -1);
   std::vector<int64_t> last_stride(n, -1);
   for (int j = n - 1; j >= 0; --j) {
     int32_t d = dim_map[j];
     if (d == -1 || host_size[d] == 1) {
-      stride_map[j] = -1;
+      stride_map_int64[j] = -1;
     } else if (last_stride[d] == -1) {
-      stride_map[j] = host_stride[d];
-      last_stride[d] = stride_map[j] * device_size[j];
+      stride_map_int64[j] = host_stride[d];
+      // last_stride[d] = stride_map_int64[j] * device_size[j];
+      last_stride[d] = stride_map_int64[j] * device_size[j].as_int_unchecked();
     } else {
-      stride_map[j] = last_stride[d];
-      last_stride[d] = stride_map[j] * device_size[j];
+      stride_map_int64[j] = last_stride[d];
+      // last_stride[d] = stride_map_int64[j] * device_size[j];
+      last_stride[d] = stride_map_int64[j] * device_size[j].as_int_unchecked();
     }
+  }
+  // Convert to symInt stride_map
+  std::vector<c10::SymInt> stride_map(n);
+  for (int i = 0; i < n; ++i) {
+    stride_map[i] = c10::SymInt(stride_map_int64[i]);
   }
   return stride_map;
 }
@@ -286,7 +293,7 @@ void SpyreTensorImpl::shallow_copy_from(
 uint64_t get_device_size_in_bytes(SpyreTensorLayout stl) {
   uint64_t size_bytes = BYTES_IN_STICK;
   for (int i = stl.device_size.size() - 2; i >= 0; i--) {
-    size_bytes *= stl.device_size[i];
+    size_bytes *= stl.device_size[i].as_int_unchecked();
   }
   return size_bytes;
 }

@@ -45,6 +45,14 @@
 namespace py = pybind11;
 
 namespace spyre {
+static std::vector<int64_t> to_concrete(const std::vector<c10::SymInt>& v) {
+  std::vector<int64_t> result;
+  result.reserve(v.size());
+  for (const auto& s : v) {
+      result.push_back(s.guard_int(__FILE__, __LINE__)); //helps in debugging
+  }
+  return result;
+}
 
 /*
  * CPU stride for a dimension.
@@ -174,8 +182,12 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
                              int64_t storage_offset, SpyreTensorLayout stl,
                              bool host2device)
     -> std::vector<DataConversionStrideInfo> {
+  // Concretize SymInt fields for all arithmetic and sendnn operations below.
+  auto concrete_device_size = to_concrete(stl.device_size);
+  auto concrete_stride_map = to_concrete(stl.stride_map);
+
   const std::vector<std::vector<int>> tile_map =
-      get_tile_map(sizes, strides, stl.device_size, stl.stride_map);
+      get_tile_map(sizes, strides, concrete_device_size, concrete_stride_map);
 
   const int host_rank = strides.size();
   const int device_rank = stl.stride_map.size();
@@ -190,14 +202,14 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
 
   int64_t prev_size = 1;
   for (int i = device_rank - 1; i > -1; i--) {
-    if (stl.stride_map[i] == 0) {
-      dcsi_sizes[i] = stl.device_size[i];
+    if (concrete_stride_map[i] == 0) {
+      dcsi_sizes[i] = concrete_device_size[i];
     }
     device_strides[i] = prev_size;
-    prev_size *= stl.device_size[i];
+    prev_size *= concrete_device_size[i];
     // Size 1 dimensions are ignored.
-    if (stl.stride_map[i] == -1) continue;
-    host_strides[i] = stl.stride_map[i];
+    if (concrete_stride_map[i] == -1) continue;
+    host_strides[i] = concrete_stride_map[i];
   }
 
   // The sizes for the subsequent DataConversionStrideInfo (remainders) match
@@ -234,7 +246,7 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
     // iterting them from front-to-back.
     for (int j = tile_map[i].size() - 1; j > -1; j--) {
       const int tile_index = tile_map[i][j];
-      const int64_t tile_size = stl.device_size[tile_index];
+      const int64_t tile_size = concrete_device_size[tile_index];
       const int64_t tile_stride = host_strides[tile_index] / host_stride;
 
       // Size 1 dimensions are ignored.
@@ -271,7 +283,7 @@ auto get_device_stride_infos(c10::IntArrayRef sizes, c10::IntArrayRef strides,
         j--;
 
         const int next_index = tile_map[i][j];
-        const int64_t next_size = stl.device_size[next_index];
+        const int64_t next_size = concrete_device_size[next_index];
         const int64_t next_stride = host_strides[next_index] / host_stride;
 
         const int64_t tiled_elements = current_elements / next_stride;
@@ -348,7 +360,7 @@ auto generate_dci(const at::Tensor* tensor, SpyreTensorLayout stl,
   dci.dataformat_dst_ = host2device ? dtype_dev : dtype_cpu;
 
   std::vector<int64_t> cpu_shape;
-  std::vector<int64_t> dev_shape = stl.device_size;
+  std::vector<int64_t> dev_shape = to_concrete(stl.device_size);
   c10::IntArrayRef t_sizes;
   c10::IntArrayRef t_strides;
   if (host2device) {

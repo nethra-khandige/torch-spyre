@@ -17,6 +17,7 @@
 #include "module.h"
 
 #include <c10/core/ScalarType.h>
+#include <c10/core/SymInt.h>
 #include <pybind11/native_enum.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
@@ -278,7 +279,7 @@ PYBIND11_MODULE(_C, m) {
                     std::vector<int32_t>>(),
            py::arg("host_size"), py::arg("host_strides"), py::arg("dtype"),
            py::arg("dim_order"))
-      .def(py::init<std::vector<int64_t>, std::vector<int64_t>, DataFormats>(),
+      .def(py::init<std::vector<c10::SymInt>, std::vector<c10::SymInt>, DataFormats>(),
            py::arg("device_size"), py::arg("stride_map"),
            py::arg("device_dtype"))
       .def(py::pickle(
@@ -300,18 +301,30 @@ PYBIND11_MODULE(_C, m) {
                 throw py::value_error(
                     "Invalid SpyreTensorLayout pickle v1: wrong tuple size");
               }
-              return spyre::SpyreTensorLayout(t[1].cast<std::vector<int64_t>>(),
-                                              t[3].cast<std::vector<int64_t>>(),
-                                              t[4].cast<DataFormats>());
+              {
+              // get from pickle format and send symint data to new constructors
+              auto ds = t[1].cast<std::vector<int64_t>>();
+              auto sm = t[3].cast<std::vector<int64_t>>();
+              return spyre::SpyreTensorLayout(
+                  std::vector<c10::SymInt>(ds.begin(), ds.end()),
+                  std::vector<c10::SymInt>(sm.begin(), sm.end()),
+                  t[4].cast<DataFormats>());
+            }
             } else if (version == 2) {
               // Version 2: (version, device_size, stride_map, device_dtype)
               if (t.size() != 4) {
                 throw py::value_error(
                     "Invalid SpyreTensorLayout pickle v2: wrong tuple size");
               }
-              return spyre::SpyreTensorLayout(t[1].cast<std::vector<int64_t>>(),
-                                              t[2].cast<std::vector<int64_t>>(),
-                                              t[3].cast<DataFormats>());
+              {
+                // get from pickle format and send symint data to new constructors
+              auto ds = t[1].cast<std::vector<int64_t>>();
+              auto sm = t[2].cast<std::vector<int64_t>>();
+              return spyre::SpyreTensorLayout(
+                  std::vector<c10::SymInt>(ds.begin(), ds.end()),
+                  std::vector<c10::SymInt>(sm.begin(), sm.end()),
+                  t[3].cast<DataFormats>());
+            }
             } else {
               throw py::value_error(
                   "Unsupported SpyreTensorLayout pickle version: " +
