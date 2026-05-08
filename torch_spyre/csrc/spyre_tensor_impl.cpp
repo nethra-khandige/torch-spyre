@@ -132,7 +132,8 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
 void SpyreTensorLayout::init(std::vector<int64_t> host_size,
                              std::vector<int64_t> host_strides,
                              c10::ScalarType dtype,
-                             std::vector<int32_t> dim_order) {
+                             std::vector<int32_t> dim_order,
+                             const std::vector<int64_t>& per_dim_max) {
   TORCH_CHECK((host_size.size() == dim_order.size()) ||
                   (((host_size.size() + 1) == dim_order.size()) &&
                    dim_order.back() == -1),
@@ -161,17 +162,25 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
   auto elems_in_stick = sparse ? 1 : this->elems_per_stick();
   auto stick_dim = dim_map.back();
   this->device_size[dim_map.size() - 1] = this->elems_per_stick();
-  for (int i = 0; i < dim_map.size() - 1; i++) {
+
+  // Returns the allocation size for dimension d
+  auto effective_size = [&](int32_t d) -> int64_t {
+    if (!per_dim_max.empty() && d < static_cast<int>(per_dim_max.size()) &&
+        per_dim_max[d] >= 0) {
+      return per_dim_max[d];
+    }
+    return host_size[d];
+  };
+
+  for (int i = 0; i < static_cast<int>(dim_map.size()) - 1; i++) {
     auto dim = dim_map[i];
     if (dim == stick_dim) {
-      if (sparse) {
-        this->device_size[i] = 1;
-      } else {
-        this->device_size[i] =
-            (host_size[stick_dim] + elems_in_stick - 1) / elems_in_stick;
-      }
+      this->device_size[i] =
+          sparse ? 1
+                 : (effective_size(stick_dim) + elems_in_stick - 1) /
+                       elems_in_stick;
     } else {
-      this->device_size[i] = host_size[dim];
+      this->device_size[i] = effective_size(dim);
     }
   }
   this->stride_map = dim_map_to_stride_map(dim_map, host_size, host_strides,

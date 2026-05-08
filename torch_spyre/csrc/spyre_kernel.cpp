@@ -34,6 +34,7 @@
 #include "logging.h"
 #include "spyre_allocator.h"
 #include "spyre_stream.h"
+#include "spyre_tensor_impl.h"
 
 namespace fs = std::filesystem;
 
@@ -200,10 +201,30 @@ KernelArtifacts& getOrLoadArtifacts(const std::string& code_dir,
 }
 
 void launchKernel(const std::string& code_dir,
-                  const std::vector<at::Tensor>& args) {
+                  const std::vector<at::Tensor>& args,
+                  const std::vector<std::vector<int64_t>>& max_input_sizes) {
   auto stream = getCurrentStream(c10::Device(c10::DeviceType::PrivateUse1, -1));
-
   auto& arts = getOrLoadArtifacts(code_dir, stream);
+
+  // Reinitialise the SpyreTensorLayout for each input that carries a per-dim
+  // max override, so device_size reflects the maximum valid input shape rather
+  // than the first-trace shape.
+  // TODO(nethrakhandige): once SDSC is compiled with max shapes, granularity,
+  // also pass actual runtime sizes
+  for (size_t i = 0; i < max_input_sizes.size() && i < args.size(); ++i) {
+    if (max_input_sizes[i].empty()) continue;
+    auto* impl = dynamic_cast<SpyreTensorImpl*>(args[i].unsafeGetTensorImpl());
+    if (impl == nullptr) continue;
+
+    std::vector<int64_t> host_size(args[i].sizes().begin(),
+                                   args[i].sizes().end());
+    std::vector<int64_t> host_strides(args[i].strides().begin(),
+                                      args[i].strides().end());
+    auto dim_order =
+        spyre::generic_stick_dim_order(static_cast<int32_t>(host_size.size()));
+    impl->spyre_layout.init(host_size, host_strides, args[i].scalar_type(),
+                            dim_order, max_input_sizes[i]);
+  }
 
   stream.executeProgramAsync(arts, args);
 }

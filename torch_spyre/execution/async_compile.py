@@ -37,7 +37,12 @@ class SpyreAsyncCompile:
     def __init__(self) -> None:
         pass
 
-    def sdsc(self, kernel_name: str, specs: list[OpSpec | UnimplementedOp]):
+    def sdsc(
+        self,
+        kernel_name: str,
+        specs: list[OpSpec | UnimplementedOp],
+        max_input_sizes=None,
+    ):
         unimp = [s for s in specs if isinstance(s, UnimplementedOp)]
         if len(unimp) != 0:
             logger.warning(
@@ -53,7 +58,7 @@ class SpyreAsyncCompile:
         # Invoke backend compiler of SDSC Bundle
         subprocess.run(["dxp_standalone", "--bundle", "-d", output_dir], check=True)
 
-        return SpyreSDSCKernelRunner(kernel_name, output_dir)
+        return SpyreSDSCKernelRunner(kernel_name, output_dir, max_input_sizes)
 
     def wait(self, scope: dict[str, Any]) -> None:
         pass

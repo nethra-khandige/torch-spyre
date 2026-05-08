@@ -14,6 +14,8 @@
 
 from typing import Sequence, Union
 
+import sympy
+
 from torch._inductor.utils import IndentedBuffer
 from torch._inductor.utils import (
     get_kernel_metadata,
@@ -32,6 +34,55 @@ from torch.utils._ordered_set import OrderedSet
 
 from .spyre_kernel import SpyreKernel
 from .pass_utils import iteration_space
+
+
+def _compute_max_input_sizes(kernel) -> list:
+    """
+    Return max host shapes for each kernel arg or -1 when not needed.
+
+    Returns -1 for tensors with no symbolic dimensions (static shapes need no override).
+    For symbolic dimensions the upper bound is read from ShapeEnv; when no finite upper bound is available
+    we fall back to size_hint (the concrete value from the first trace).
+
+    """
+    result: list[list[int]] = []
+    shape_env = V.graph.sizevars.shape_env
+
+    for name, tensor_arg in kernel.spyre_kernel_args:
+        if not tensor_arg.is_input or tensor_arg.allocation:
+            result.append([])
+            continue
+
+        buf = V.graph.get_buffer(name)
+        if buf is None:
+            result.append([])
+            continue
+
+        layout = buf.get_layout()
+        max_shape = []
+        has_symbolic = False
+        for s in layout.size:
+            if isinstance(s, (int, sympy.Integer)):
+                max_shape.append(-1)
+            elif hasattr(s, "free_symbols") and s.free_symbols:
+                has_symbolic = True
+                sym = next(iter(s.free_symbols))
+                rng = getattr(shape_env, "var_to_range", {}).get(sym)
+                if rng is not None:
+                    try:
+                        max_val = int(rng.upper)
+                    except Exception:
+                        # fall back to size_hint() when no finite upper bound available
+                        max_val = V.graph.sizevars.size_hint(s)
+                else:
+                    max_val = V.graph.sizevars.size_hint(s)
+                max_shape.append(max_val)
+            else:
+                max_shape.append(-1)
+
+        result.append(max_shape if has_symbolic else [])
+
+    return result
 
 
 class SuperDSCScheduling(BaseScheduling):
@@ -112,7 +163,8 @@ class SuperDSCScheduling(BaseScheduling):
                     vars[len(node._body.iter_vars) :],
                 ]
                 node.codegen(index_vars)
-
+        # TODO: compute max shapes here (before codegen_kernel) and pass into
+        # codegen_kernel → create_op_spec so mb_/out_ in the SDSC use max values.
         with V.set_kernel_handler(kernel):
             src_code = kernel.codegen_kernel()
         kernel_name = self.define_kernel(src_code, node_schedule, kernel)
@@ -142,10 +194,13 @@ class SuperDSCScheduling(BaseScheduling):
             fused_name = get_fused_kernel_name(node_schedule, "original_aten")
             kernel_name = "_".join(["sdsc", fused_name, wrapper.next_kernel_suffix()])
             wrapper.src_to_kernel[src_code] = kernel_name
+            # Compute max host shapes for each input -- needed for symbolic shapes
+            max_input_sizes = _compute_max_input_sizes(kernel)
             buf = IndentedBuffer()
             buf.writeline(f"async_compile.sdsc('{kernel_name}',")
             with buf.indent():
                 buf.splice(f"{src_code}")
+                buf.writeline(f", max_input_sizes={max_input_sizes!r}")
             buf.writeline(")")
             origins, detailed_origins = get_kernel_metadata(node_schedule, wrapper)
             metadata_comment = f"{origins}\n{detailed_origins}"

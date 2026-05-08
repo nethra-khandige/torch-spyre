@@ -57,8 +57,9 @@ std::string get_pagi_path(const std::string& code_dir);
 
 KernelArtifacts& getOrLoadArtifacts(const std::string& code_dir,
                                     const SpyreStream& stream);
-void launchKernel(const std::string& code_dir,
-                  const std::vector<at::Tensor>& args);
+void launchKernel(
+    const std::string& code_dir, const std::vector<at::Tensor>& args,
+    const std::vector<std::vector<int64_t>>& max_input_sizes = {});
 
 void clearArtifactCache();
 

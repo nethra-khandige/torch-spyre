@@ -90,7 +90,8 @@ class SpyreTensorLayout {
   void init(std::vector<int64_t> host_size, c10::ScalarType dtype);
 
   void init(std::vector<int64_t> host_size, std::vector<int64_t> host_strides,
-            c10::ScalarType dtype, std::vector<int32_t> dim_order);
+            c10::ScalarType dtype, std::vector<int32_t> dim_order,
+            const std::vector<int64_t>& per_dim_max = {});
 
   std::string toString() const;
 

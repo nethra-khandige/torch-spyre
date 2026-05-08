@@ -155,7 +155,9 @@ PYBIND11_MODULE(_C, m) {
   m.doc() = "Spyre C++ bindings";
   m.def("start_runtime", &spyre::startRuntime);
   m.def("free_runtime", &spyre::freeRuntime);
-  m.def("launch_kernel", &spyre::launchKernel);
+  m.def("launch_kernel", &spyre::launchKernel, py::arg("code_dir"),
+        py::arg("args"),
+        py::arg("max_input_sizes") = std::vector<std::vector<int64_t>>{});
   m.def("encode_constant", &spyre::encodeConstant);
 
   py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");

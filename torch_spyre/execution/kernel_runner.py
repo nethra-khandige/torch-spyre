@@ -30,10 +30,12 @@ class SpyreUnimplementedRunner:
 
 
 class SpyreSDSCKernelRunner:
-    def __init__(self, name: str, code_dir: str):
+    def __init__(self, name: str, code_dir: str, max_input_sizes=None):
         self.kernel_name = name
         self.code_dir = code_dir
+        # max_input_sizes: for symbolic shape
+        self.max_input_sizes: list = max_input_sizes or []
 
     def run(self, *args, **kw_args):
         logger.info("RUN: %s %s", self.kernel_name, self.code_dir)
-        launch_kernel(self.code_dir, args)
+        launch_kernel(self.code_dir, args, self.max_input_sizes)
