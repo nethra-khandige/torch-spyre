@@ -165,7 +165,7 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
 
   // Returns the allocation size for dimension d
   auto effective_size = [&](int32_t d) -> int64_t {
-    if (!per_dim_max.empty() && d < static_cast<int>(per_dim_max.size()) &&
+    if (!per_dim_max.empty() && d < static_cast<int32_t>(per_dim_max.size()) &&
         per_dim_max[d] >= 0) {
       return per_dim_max[d];
     }

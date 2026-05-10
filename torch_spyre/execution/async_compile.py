@@ -41,7 +41,7 @@ class SpyreAsyncCompile:
         self,
         kernel_name: str,
         specs: list[OpSpec | UnimplementedOp],
-        max_input_sizes=None,
+        max_input_sizes: list[list[int]] | None = None,
     ):
         unimp = [s for s in specs if isinstance(s, UnimplementedOp)]
         if len(unimp) != 0:

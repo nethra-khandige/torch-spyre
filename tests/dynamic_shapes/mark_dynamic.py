@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dynamic shape version of gelu.py using mark_dynamic.
-# Dim 0 (batch) is marked dynamic with an explicit max
-
 import torch
 import torch._dynamo as dynamo
 import torch.nn.functional as F
@@ -33,10 +30,8 @@ x = torch.rand(512, 1024, dtype=torch.float16)
 
 # Mark dim 0 as dynamic with an explicit upper bound.
 x_device = x.to(DEVICE)
-x_cpu = x.to("cpu")
 dynamo.mark_dynamic(x_device, 0, min=1, max=576)
-dynamo.mark_dynamic(x_cpu, 0, min=1, max=576)
-cpu_result = gelu_fn(x_cpu)
+cpu_result = gelu_fn(x)
 
 compiled_result = compiled_fn(x_device).cpu()
 

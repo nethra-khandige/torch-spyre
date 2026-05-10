@@ -36,20 +36,19 @@ from .spyre_kernel import SpyreKernel
 from .pass_utils import iteration_space
 
 
-def _compute_max_input_sizes(kernel) -> list:
+def _compute_max_input_sizes(kernel) -> list[list[int]]:
     """
-    Return max host shapes for each kernel arg or -1 when not needed.
+    Return max shape for each kernel arg
 
-    Returns -1 for tensors with no symbolic dimensions (static shapes need no override).
-    For symbolic dimensions the upper bound is read from ShapeEnv; when no finite upper bound is available
-    we fall back to size_hint (the concrete value from the first trace).
-
+    List of ints: per-dim overrides for an input with at least one symbolic dim;
+      -1 marks a static dimension, a positive int is the ShapeEnv upper bound.
     """
     result: list[list[int]] = []
     shape_env = V.graph.sizevars.shape_env
+    input_names = {name for name, targ in kernel.spyre_kernel_args if targ.is_input}
 
-    for name, tensor_arg in kernel.spyre_kernel_args:
-        if not tensor_arg.is_input or tensor_arg.allocation:
+    for name in kernel.args.python_argdefs()[1]:
+        if name not in input_names:
             result.append([])
             continue
 
@@ -59,20 +58,24 @@ def _compute_max_input_sizes(kernel) -> list:
             continue
 
         layout = buf.get_layout()
-        max_shape = []
+        max_shape: list[int] = []
         has_symbolic = False
         for s in layout.size:
             if isinstance(s, (int, sympy.Integer)):
                 max_shape.append(-1)
             elif hasattr(s, "free_symbols") and s.free_symbols:
                 has_symbolic = True
-                sym = next(iter(s.free_symbols))
-                rng = getattr(shape_env, "var_to_range", {}).get(sym)
-                if rng is not None:
-                    try:
-                        max_val = int(rng.upper)
-                    except Exception:
-                        # fall back to size_hint() when no finite upper bound available
+                if shape_env is not None and hasattr(shape_env, "bound_sympy"):
+                    vr = shape_env.bound_sympy(s)
+                    # Use int() only when the bound is a concrete sympy.Integer.
+                    # if isinstance(vr.upper, sympy.Integer):
+                    if (
+                        hasattr(vr, "upper")
+                        and isinstance(vr.upper, sympy.Integer)
+                        and int(vr.upper) > 0
+                    ):
+                        max_val = int(vr.upper)
+                    else:
                         max_val = V.graph.sizevars.size_hint(s)
                 else:
                     max_val = V.graph.sizevars.size_hint(s)
