@@ -144,7 +144,7 @@ def compute_max_size(expr: Union[Expr, int]) -> int:
         return int(expr)
     shape_env = V.graph.sizevars.shape_env
     vr = shape_env.bound_sympy(expr)
-    if isinstance(vr.upper, sympy.Integer) and int(vr.upper) > 0:
+    if isinstance(vr.upper, sympy.Integer) and vr.upper.is_finite and int(vr.upper) > 0:
         return int(vr.upper)
     return V.graph.sizevars.size_hint(expr)
 

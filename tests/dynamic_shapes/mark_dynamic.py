@@ -19,7 +19,7 @@
 # exercise the path where compute_max_size can return the
 # ShapeEnv bound directly rather than falling back to size_hint.
 # Right now this is a work in progress- the bound is not yet propagated into
-# the SDSC.  
+# the SDSC.
 
 
 import torch
@@ -39,7 +39,7 @@ x = torch.rand(512, 1024, dtype=torch.float16)
 # Mark dim 0 as dynamic with an explicit upper bound.
 x_device = x.to(DEVICE)
 dynamo.mark_dynamic(x_device, 0, min=1, max=576)
-compiled_fn = torch.compile(gelu_fn, dynamic=True)
+compiled_fn = torch.compile(gelu_fn)
 cpu_result = gelu_fn(x)
 
 compiled_result = compiled_fn(x_device).cpu()
