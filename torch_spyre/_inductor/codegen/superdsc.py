@@ -36,6 +36,7 @@ from torch_spyre._inductor.op_spec import TensorArg
 from torch_spyre._inductor.dtype_ops import DtypeOpTable
 
 from .compute_ops import SymbolKind, generate_sdsc
+# from torch_spyre._inductor.pass_utils import compute_max_size, compute_min_size
 
 logger = get_inductor_logger("codegen.superdsc")
 
@@ -91,6 +92,8 @@ class SDSCSpec:
     args: list[SDSCArgs]
     constants: dict[str, Any]
     coordinate_masking: dict[Symbol, Any]
+    # maps SDSC dim name -> (pytorch_sym_name, min_val, max_val)
+    symbolic_dims: dict = dataclasses.field(default_factory=dict)
 
     def __str__(self) -> str:
         iter_space = ", ".join(f"{k}={v}" for k, v in self.iteration_space.items())
@@ -457,6 +460,21 @@ def _concretize_for_sdsc(expr: Expr) -> int:
         return V.graph.sizevars.size_hint(expr)
     return int(expr)
 
+def _resolve_sdsc_size(expr: Expr, symbolic_dim_bounds: dict) -> int:
+    """Resolve an iteration-space size for SDSC generation.
+
+    For symbolic dims, reads the max from symbolic_dim_bounds (computed at
+    codegen time from ShapeEnv, serialized as plain ints into the generated
+    file) so this works during the reload phase when ShapeEnv is gone.
+    Falls back to _concretize_for_sdsc for concrete expressions.
+    """
+    if hasattr(expr, "free_symbols") and expr.free_symbols:
+        sym_name = str(next(iter(expr.free_symbols)))
+        if sym_name in symbolic_dim_bounds:
+            return symbolic_dim_bounds[sym_name][1]  # max
+    return _concretize_for_sdsc(expr)
+
+
 
 def _ref_arg(op_spec):
     if op_spec.is_reduction:
@@ -540,6 +558,7 @@ def _extend_matmul_k_to_padded(
 
 
 def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
+    print(f"[superdsc_parse_op_spec]op_spec:{op_spec}\n\n")
     is_matmul = _is_matmul(op_spec.op)
     ndim = len(op_spec.iteration_space)
 
@@ -552,10 +571,37 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         ", ".join(f"{k} -> {v}" for k, v in symbol_mapping.items()),
     )
 
+    print(
+        f"[superdsc] parse_op_spec: op={op_spec.op} "
+        f"iteration_space={op_spec.iteration_space} "
+        f"symbolic_dim_bounds={op_spec.symbolic_dim_bounds}"
+    )
+
     sdsc_iteration_space = {
-        symbol_mapping[sym]: _concretize_for_sdsc(size)
+        # symbol_mapping[sym]: _concretize_for_sdsc(size)
+        symbol_mapping[sym]: _resolve_sdsc_size(size, op_spec.symbolic_dim_bounds)
         for sym, (size, _) in op_spec.iteration_space.items()
     }
+    print(
+        f"2[superdsc] parse_op_spec: op={op_spec.op} "
+        f"iteration_space={op_spec.iteration_space} "
+        f"sdsc_iteration_space={sdsc_iteration_space}"
+        f"symbolic_dim_bounds={op_spec.symbolic_dim_bounds}"
+    )
+    symbolic_dims: dict[str, tuple[str, int, int]] = {}
+    for sym, (size_expr, _) in op_spec.iteration_space.items():
+        sdsc_dim_name = str(symbol_mapping[sym])
+        sym_str = str(size_expr)
+        if sym_str in op_spec.symbolic_dim_bounds:
+            min_val, max_val, _ = op_spec.symbolic_dim_bounds[sym_str]
+            symbolic_dims[sdsc_dim_name] = (sym_str, min_val, max_val)
+    print(
+        f"3[superdsc] parse_op_spec: op={op_spec.op} "
+        f"iteration_space={op_spec.iteration_space} "
+        f"sdsc_iteration_space={sdsc_iteration_space}"
+        f"symbolic_dim_bounds={op_spec.symbolic_dim_bounds}"
+        f"symbolic_dims-{symbolic_dims}"
+    )
 
     dim_splits = {
         symbol_mapping[dim]: value[-1] for dim, value in op_spec.iteration_space.items()
@@ -650,6 +696,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         core_id_to_work_slice = _get_core_to_slice_mapping(
             sdsc_iteration_space, dim_splits, num_cores
         )
+    print(f"[parse]before return of parse: symbolic_dims:{symbolic_dims}")
 
     return (
         SDSCSpec(
@@ -668,6 +715,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
             args=args,
             constants=constants,
             coordinate_masking=coordinate_masking,
+            symbolic_dims=symbolic_dims,
         ),
         symbol_mapping,
     )
@@ -687,6 +735,7 @@ def compile_op_spec(
     tiled_symbols = [
         symbol_mapping[s] for s in op_spec.tiled_symbols if s in symbol_mapping
     ]
+    print(f"[superdsc]sdsc_spec:{sdsc_spec.symbolic_dims}\n\n")
     return generate_sdsc(
         idx,
         sdsc_spec,

@@ -448,11 +448,18 @@ def align_tensors(
     # TODO(issue#1373): make align_tensors symbolic-aware so concretization can
     #              be removed.
 
+    # Preserve original expressions (may be symbolic) before concretizing for the algorithm. CHANGE
+    orig_ranges = {var: val[0] for var, val in iteration_space.items()}
+
     repeat_info: set[sympy.Symbol] = getattr(V.graph, "_repeat_info", set())
 
     var_ranges = {
         var: _concretize_for_cmp(val[0]) for var, val in iteration_space.items()
     }
+    print(
+        f"[align_tensors] var_ranges after _concretize_for_cmp: {var_ranges} "
+        f"(original symbolic: {[(str(var), str(val[0])) for var, val in iteration_space.items() if hasattr(val[0], 'free_symbols') and val[0].free_symbols]})"
+    )
 
     # work division for each variable
     op_it_space_splits = {var: val[1] for var, val in iteration_space.items()}
@@ -540,7 +547,8 @@ def align_tensors(
         else:
             # no splits keep existing var, range, and work division
             # may happen with a single stick since the stick size is omitted
-            new_var_ranges[var] = var_ranges[var]
+            # new_var_ranges[var] = var_ranges[var]
+            new_var_ranges[var] = orig_ranges[var] ###CHANGE
             new_op_it_space_splits[var] = (
                 op_it_space_splits[var] if var in op_it_space_splits else 1
             )
@@ -640,9 +648,14 @@ def align_tensors(
                         t["coordinates"][i] = stick_dim_var // t["size"][-1]
                         t["coordinates"][-1] = stick_dim_var % t["size"][-1]
                         break
+    for var, orig_expr in orig_ranges.items():
+        if var in new_var_ranges and new_var_ranges[var] == var_ranges[var]:
+            new_var_ranges[var] = orig_expr
+
 
     new_iteration_space = {
         k: (v, new_op_it_space_splits[k]) for k, v in new_var_ranges.items()
     }
+    print(f"[align_tensors] new_var_ranges (post-restore): {new_var_ranges},new_iteration_space:{new_iteration_space}")
 
     return new_iteration_space, new_tensors

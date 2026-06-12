@@ -71,6 +71,8 @@ class OpSpec:
     args: Sequence[TensorArg]
     op_info: dict[str, Any]
     tiled_symbols: list[Symbol] = dataclasses.field(default_factory=list)
+    symbolic_dim_bounds: dict[str, tuple[int, int,int]] = dataclasses.field(default_factory=dict)
+    # maps symbol name (e.g. 's97') -> (min, max) from mark_dynamic
 
 
 @dataclasses.dataclass
