@@ -272,7 +272,7 @@ def compute_max_size(expr: Union[Expr, int]) -> int:
     return V.graph.sizevars.size_hint(expr)
 
 
-def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int] | None":
+def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int, int] | None":
     """Return (min, max, hint) bounds for a symbolic expression from ShapeEnv.
 
     Returns None for concrete expressions (no free symbols).
@@ -288,8 +288,16 @@ def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int] | None":
     vr = shape_env.bound_sympy(expr)
     if vr is None:
         return None
-    lower = int(vr.lower) if isinstance(vr.lower, sympy.Integer) and vr.lower.is_finite else 0
-    upper = int(vr.upper) if isinstance(vr.upper, sympy.Integer) and vr.upper.is_finite else V.graph.sizevars.size_hint(expr)
+    lower = (
+        int(vr.lower)
+        if isinstance(vr.lower, sympy.Integer) and vr.lower.is_finite
+        else 0
+    )
+    upper = (
+        int(vr.upper)
+        if isinstance(vr.upper, sympy.Integer) and vr.upper.is_finite
+        else V.graph.sizevars.size_hint(expr)
+    )
     return (lower, upper, V.graph.sizevars.size_hint(expr))
 
 

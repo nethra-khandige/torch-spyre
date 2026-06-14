@@ -503,10 +503,6 @@ class SpyreKernel(Kernel[CSEVariable]):
                 raise Unsupported(f"{op} on {arg.device_dtype}")
 
         it_space = iteration_space(self.current_node)
-        print(
-            f"[spyre_kernel] create_op_spec: it_space={it_space} "
-            f"symbolic={[str(k) for k,v in it_space.items() if hasattr(v, 'free_symbols') and v.free_symbols]}"
-        )
 
         ir_node = self.current_node.node  # ComputedBuffer
         work_division: dict[sympy.Symbol, int] = {}
@@ -556,13 +552,14 @@ class SpyreKernel(Kernel[CSEVariable]):
                 if n_output_syms + r < len(it_space_keys)
             ]
 
-        symbolic_dim_bounds: dict[str, tuple[int, int]] = {}
+        # Collect (min, max, hint) bounds for any symbolic iteration-space dims.
+        # These are passed through OpSpec so SDSC codegen can emit symbolicDimInfo_
+        # without needing the live ShapeEnv (which is gone during the codegen phase).
+        symbolic_dim_bounds: dict[str, tuple[int, int, int]] = {}
         for _, (size_expr, _) in it_space_extended.items():
             bounds = compute_symbolic_bounds(size_expr)
             if bounds is not None:
                 symbolic_dim_bounds[str(size_expr)] = bounds
-
-        print(f"[inside SpyreKernel in spyre_kernel] symbolic_dim_bounds:{symbolic_dim_bounds}")
 
         return OpSpec(
             op,
@@ -853,7 +850,9 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
                         + ", ".join(sympy_str(s) for s in op_spec.tiled_symbols)
                         + "],"
                     )
-                buf.writeline(f"symbolic_dim_bounds={_serialize_value(op_spec.symbolic_dim_bounds)},")
+                buf.writeline(
+                    f"symbolic_dim_bounds={_serialize_value(op_spec.symbolic_dim_bounds)},"
+                )
                 buf.writeline("args=[")
                 with buf.indent():
                     for arg in op_spec.args:

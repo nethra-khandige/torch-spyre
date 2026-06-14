@@ -33,11 +33,11 @@ class SymbolKind:
                                              global ``symbols`` list of the kernel base symbol.
       - ``pool()``:                          pool-allocated tensor address;
                                              emitted as ``arith.addi %pool, value``.
-        - ``dimension(gran, max, sym)``:       dynamic iteration-space dim size from
+      - ``dimension(gran, max, sym)``:       dynamic iteration-space dim size from
                                              mark_dynamic; carried in SDSC JSON as a
-                                             ``dimToSymbolMapping_`` entry.  Registered in
-                                             the shared counter before address symbols so
-                                             negative IDs never collide.
+                                             ``dimToSymbolMapping_`` entry.  Registered
+                                             before address symbols so their negative IDs
+                                             never collide with address symbol IDs.
     """
 
     kind: str
@@ -66,7 +66,7 @@ class SymbolKind:
     @classmethod
     def pool(cls) -> "SymbolKind":
         return cls(kind="pool")
-    
+
     @classmethod
     def dimension(
         cls, granularity: int, max_value: int, pytorch_sym: str
@@ -78,7 +78,6 @@ class SymbolKind:
             pytorch_sym=pytorch_sym,
         )
 
-
     @property
     def is_derived(self) -> bool:
         return self.kind == "kernel_derived"
@@ -86,7 +85,7 @@ class SymbolKind:
     @property
     def is_pool(self) -> bool:
         return self.kind == "pool"
-    
+
     @property
     def is_dimension(self) -> bool:
         return self.kind == "dimension"
@@ -335,22 +334,13 @@ def generate_sdsc(
         }
         for c in range(sdsc_spec.num_cores)
     }
-    # sym_id_map = {
-    #     dim_name: -(i + 1)
-    #     for i, dim_name in enumerate(sdsc_spec.symbolic_dims)
-    # }
-    print(f"[generate_sdsc: symbolic_dims:{sdsc_spec.symbolic_dims}]")
-    # if sdsc_spec.symbolic_dims is None:
-    #     symbolic_dims = {}
-    # print(f"[generate_sdsc: symbolic_dims:{symbolic_dims}]")
     symbolic_dims = sdsc_spec.symbolic_dims or {}
 
-    # Register dimension symbols FIRST so their IDs never collide with address symbols.
-    # Dim symbols occupy IDs -(offset+1)..-(offset+n_dim); address symbols then start
-    # at -(offset+n_dim+1).  symbols[abs(id)-1] always holds the registered value.
-    # Dim symbols have no HBM byte value; we store 0 as a placeholder.
-    # dim_local_symbols: pytorch_sym_name -> negative symbol ID (no cross-SDSC dedup).
-    dim_local_symbols: dict[str, int] = {}
+    # Register dimension symbols BEFORE address symbols so their IDs never collide.
+    # IDs are laid out as: -(offset+1)..-(offset+n_dim) for dim symbols, then
+    # -(offset+n_dim+1)..-(offset+n_dim+k) for address symbols.
+    # Dim symbols carry no HBM byte value; 0 is appended to `symbols` as a placeholder.
+    dim_local_symbols: dict[str, int] = {}  # pytorch_sym_name -> negative symbol ID
     dim_symbol_kinds: list[SymbolKind] = []
     for sdsc_dim, (pytorch_sym, per_core_gran, per_core_max) in symbolic_dims.items():
         if pytorch_sym not in dim_local_symbols:
@@ -361,23 +351,6 @@ def generate_sdsc(
             )
             symbols.append(0)  # placeholder: dim symbols have no HBM byte value
     n_dim_syms = len(dim_symbol_kinds)
-
-    # Precompute SDSC JSON helpers for dim symbols.
-    # dim_to_symbol_mapping: dict[str, list[int]] = {
-    #     sdsc_dim: [dim_local_symbols[pytorch_sym]]
-    #     for sdsc_dim, (pytorch_sym, per_core_gran, per_core_max) in symbolic_dims.items()
-    #     if pytorch_sym in dim_local_symbols
-    # }
-    # symbolic_dim_info: dict[str, dict] = {
-    #     sdsc_dim: {"maxSize_": per_core_max, "granularity_": per_core_gran}
-    #     for sdsc_dim, (pytorch_sym, per_core_gran, per_core_max) in symbolic_dims.items()
-    # }
-    input_symbols_and_tags: dict[str, str] = {
-        str(sym_id): pytorch_sym
-        for pytorch_sym, sym_id in dim_local_symbols.items()
-    }
-
-
 
     # local_symbols maps base HBM byte offset -> globally-unique negative symbol id.
     # symbol_id_offset ensures ids are unique across all SDSCs in the bundle.
@@ -417,8 +390,7 @@ def generate_sdsc(
 
         def offset_as_symbol(s, kind: SymbolKind):
             if s not in local_symbols:
-                # local_symbols[s] = -(symbol_id_offset + len(local_symbols) + 1)
-                # Address symbols start after dim symbols in the shared counter.
+                # Address symbols start after dim symbols in the ID counter.
                 local_symbols[s] = -(
                     symbol_id_offset + n_dim_syms + len(local_symbols) + 1
                 )
@@ -437,12 +409,9 @@ def generate_sdsc(
             core0_addr = tensor.start_address + core_idx_to_slice_offset(
                 tensor, core_id_to_wk_slice["0"], sdsc_spec.work_slices
             ) * num_bytes(tensor.data_format)
-            # base_sym_idx: index in global symbols[] where core-0 will be registered.
-            # Used by kernel_derived symbols to reference their base without searching.
-            # base_sym_idx = symbol_id_offset + len(local_symbols)
-            # base_sym_idx: 0-based index in global symbols[] where core-0 will be
-            # registered.  Accounts for dim symbols that occupy the first n_dim_syms
-            # slots within this SDSC's offset range.
+            # 0-based index in global symbols[] where this tensor's core-0 address will
+            # be registered. Offset by n_dim_syms because dim symbols occupy the first
+            # n_dim_syms slots in this SDSC's range of the shared counter.
             base_sym_idx = symbol_id_offset + n_dim_syms + len(local_symbols)
             tensor_tiled = [s for s in tiled_symbols if s in tensor.strides]
             if not tensor_tiled:
@@ -557,15 +526,17 @@ def generate_sdsc(
                             "maskingConstId_": 0
                             if sdsc_spec.coordinate_masking
                             else -1,
-                            # "dimToSymbolMapping_": {
-                            #     dim_name: [sym_id]
-                            #     for dim_name, sym_id in sym_id_map.items()
-                            # },
-                           **(
+                            # Emit dimToSymbolMapping_ only when there are symbolic dims;
+                            # the runtime uses it to bind runtime shape values to symbols.
+                            **(
                                 {
                                     "dimToSymbolMapping_": {
                                         sdsc_dim: [dim_local_symbols[pytorch_sym]]
-                                        for sdsc_dim, (pytorch_sym, per_core_gran, per_core_max) in symbolic_dims.items()
+                                        for sdsc_dim, (
+                                            pytorch_sym,
+                                            per_core_gran,
+                                            per_core_max,
+                                        ) in symbolic_dims.items()
                                         if pytorch_sym in dim_local_symbols
                                     },
                                     "numCoreletsUsed_DSC2_": -1,
@@ -582,30 +553,34 @@ def generate_sdsc(
                                             // sdsc_spec.work_slices[dim]
                                             for dim, size in sdsc_spec.iteration_space.items()
                                         },
+                                        # Per-dim symbolic bounds (per-core slice).
+                                        # min_val / work_slices is the granularity that
+                                        # the runtime must respect when choosing a batch size.
                                         "symbolicDimInfo_": {
                                             dim_name: {
-                                                "maxSize_": max_val // sdsc_spec.work_slices[Symbol(dim_name)],
-                                                "granularity_": max(1, min_val // sdsc_spec.work_slices[Symbol(dim_name)]),
+                                                "maxSize_": max_val
+                                                // sdsc_spec.work_slices[
+                                                    Symbol(dim_name)
+                                                ],
+                                                "granularity_": max(
+                                                    1,
+                                                    min_val
+                                                    // sdsc_spec.work_slices[
+                                                        Symbol(dim_name)
+                                                    ],
+                                                ),
                                             }
-                                            for dim_name, (_, min_val, max_val) in symbolic_dims.items()
+                                            for dim_name, (
+                                                _,
+                                                min_val,
+                                                max_val,
+                                            ) in symbolic_dims.items()
                                         },
                                         "maxSymbolicVolume_": {},
                                         "coreletSplit_": {},
                                         "rowSplit_": {},
                                         "peSfpSplit_": {},
                                         "paddingSizes_": {},
-                                        # **(
-                                        #     {
-                                        #         "symbolicDimInfo_": symbolic_dim_info,
-                                        #         "maxSymbolicVolume_": {},
-                                        #         "coreletSplit_": {},
-                                        #         "rowSplit_": {},
-                                        #         "peSfpSplit_": {},
-                                        #         "paddingSizes_": {},
-                                        #     }
-                                        #     if symbolic_dims
-                                        #     else {}
-                                        # ),
                                     },
                                     "el_": {
                                         "name_": "core",
@@ -616,28 +591,29 @@ def generate_sdsc(
                                         },
                                         "symbolicDimInfo_": {
                                             dim_name: {
-                                                "maxSize_": max_val // sdsc_spec.work_slices[Symbol(dim_name)],
-                                                "granularity_": max(1, min_val // sdsc_spec.work_slices[Symbol(dim_name)]),
+                                                "maxSize_": max_val
+                                                // sdsc_spec.work_slices[
+                                                    Symbol(dim_name)
+                                                ],
+                                                "granularity_": max(
+                                                    1,
+                                                    min_val
+                                                    // sdsc_spec.work_slices[
+                                                        Symbol(dim_name)
+                                                    ],
+                                                ),
                                             }
-                                            for dim_name, (_, min_val, max_val) in symbolic_dims.items()
+                                            for dim_name, (
+                                                _,
+                                                min_val,
+                                                max_val,
+                                            ) in symbolic_dims.items()
                                         },
                                         "maxSymbolicVolume_": {},
                                         "coreletSplit_": {},
                                         "rowSplit_": {},
                                         "peSfpSplit_": {},
                                         "paddingSizes_": {},
-                                        # **(
-                                        #     {
-                                        #         "symbolicDimInfo_": symbolic_dim_info,
-                                        #         "maxSymbolicVolume_": {},
-                                        #         "coreletSplit_": {},
-                                        #         "rowSplit_": {},
-                                        #         "peSfpSplit_": {},
-                                        #         "paddingSizes_": {},
-                                        #     }
-                                        #     if symbolic_dims
-                                        #     else {}
-                                        # ),
                                     },
                                 }
                             },
@@ -790,14 +766,9 @@ def generate_sdsc(
                         }
                     }
                 ],
-                # "datadscs_": [],
-                # "dimToSymbolMappingOpcodeCorrection_": {},
-                # "inputSymbolsAndTags_": {
-                #     str(sym_id_map[dim_name]): sym_name
-                #     for dim_name, (sym_name, _, _) in sdsc_spec.symbolic_dims.items()
-                # },
-                # "symbolDefinitions_": {},
-                 **(
+                # Emit top-level symbolic metadata only when symbolic dims are present.
+                # inputSymbolsAndTags_ maps symbol ID -> pytorch symbol name for the runtime.
+                **(
                     {
                         "datadscs_": [],
                         "dimToSymbolMappingOpcodeCorrection_": {},
@@ -812,9 +783,8 @@ def generate_sdsc(
                 ),
             }
         },
-        # list(local_symbols.keys()),
+        # Dim symbols occupy the first n_dim_syms slots (value 0); address symbols follow.
         [0] * n_dim_syms + list(local_symbols.keys()),
         affine_strides,
-        # local_symbol_kind,
         dim_symbol_kinds + local_symbol_kind,
     )
