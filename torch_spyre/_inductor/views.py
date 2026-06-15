@@ -556,7 +556,10 @@ def align_tensors(
             # no splits keep existing var, range, and work division
             # may happen with a single stick since the stick size is omitted
             # downstream passes receive the symbolic expression, not the concretized hint.
-            new_var_ranges[var] = orig_ranges[var]
+            # Synthetic vars (z0, z1, …) are introduced by normalize_coordinates
+            # for restored size-1 dims and are not in orig_ranges; fall back to
+            # the concretized value (always 1) for those.
+            new_var_ranges[var] = orig_ranges.get(var, var_ranges[var])
             new_op_it_space_splits[var] = (
                 op_it_space_splits[var] if var in op_it_space_splits else 1
             )

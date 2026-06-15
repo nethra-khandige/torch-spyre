@@ -539,7 +539,6 @@ def generate_sdsc(
                                         ) in symbolic_dims.items()
                                         if pytorch_sym in dim_local_symbols
                                     },
-                                    "numCoreletsUsed_DSC2_": -1,
                                 }
                                 if symbolic_dims
                                 else {}

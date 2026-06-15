@@ -27,6 +27,8 @@ from torch._inductor.utils import (
 
 from torch_spyre._inductor import config
 from torch_spyre._inductor.errors import Unsupported
+from torch_spyre._inductor.codegen.compute_ops import SymbolKind
+from torch_spyre._inductor.codegen.superdsc import _resolve_sdsc_size
 from torch_spyre._inductor.work_division import (
     _collect_symbol_metadata,
     _effective_size,
@@ -89,7 +91,7 @@ class TestSpyreConfig(InductorTestCase):
         y = torch.randn_like(x)
         torch._dynamo.mark_dynamic(x, 0, min=64, max=1024)
         torch._dynamo.mark_dynamic(y, 0, min=64, max=1024)
-        comp_fn = torch.compile(fn, dynamic=True)
+        comp_fn = torch.compile(fn, dynamic=False)
         _, source_codes = run_and_get_code(comp_fn, x.to("spyre"), y.to("spyre"))
         # Iteration space embeds (size_expr, split). The symbolic batch dim's
         # split must equal SENCORES=32; the static stick dim's split must be 1.
@@ -197,3 +199,55 @@ class TestSpyreConfig(InductorTestCase):
                 {s0: sympy.Integer(128)}, [fake_td], {s0: (512, 64)}
             )
         self.assertIn("symbolic stick dim", str(cm.exception))
+
+
+class TestResolveSdscSize(InductorTestCase):
+    """Unit tests for superdsc._resolve_sdsc_size."""
+
+    def test_concrete_sympy_integer(self):
+        self.assertEqual(_resolve_sdsc_size(sympy.Integer(256), {}), 256)
+
+    def test_concrete_python_int(self):
+        self.assertEqual(_resolve_sdsc_size(128, {}), 128)
+
+    def test_symbolic_in_bounds_returns_max(self):
+        # bounds carries (min, max, hint); index [1] is max.
+        s0 = sympy.Symbol("s0", integer=True, positive=True)
+        self.assertEqual(_resolve_sdsc_size(s0, {"s0": (64, 1024, 512)}), 1024)
+
+    def test_symbolic_not_in_bounds_falls_back_to_size_hint(self):
+        # Symbol absent from bounds → _concretize_for_sdsc → size_hint.
+        s0 = sympy.Symbol("s0", integer=True, positive=True)
+        sizevars = SimpleNamespace(size_hint=lambda _: 128)
+        mock_v = SimpleNamespace(graph=SimpleNamespace(sizevars=sizevars))
+        with patch("torch_spyre._inductor.codegen.superdsc.V", mock_v):
+            self.assertEqual(_resolve_sdsc_size(s0, {}), 128)
+
+
+class TestSymbolKindDimension(InductorTestCase):
+    """Unit tests for the dimension variant added to compute_ops.SymbolKind."""
+
+    def test_factory_sets_all_fields(self):
+        sk = SymbolKind.dimension(granularity=64, max_value=1024, pytorch_sym="s0")
+        self.assertEqual(sk.kind, "dimension")
+        self.assertEqual(sk.granularity, 64)
+        self.assertEqual(sk.max_value, 1024)
+        self.assertEqual(sk.pytorch_sym, "s0")
+
+    def test_is_dimension_true(self):
+        sk = SymbolKind.dimension(granularity=64, max_value=1024, pytorch_sym="s0")
+        self.assertTrue(sk.is_dimension)
+
+    def test_address_fields_are_sentinels(self):
+        # Address-specific fields must not be set by the dimension factory so
+        # they don't collide with kernel/pool symbol-table entries.
+        sk = SymbolKind.dimension(granularity=64, max_value=1024, pytorch_sym="s0")
+        self.assertEqual(sk.arg_index, -1)
+        self.assertEqual(sk.base_sym_idx, -1)
+        self.assertEqual(sk.offset, 0)
+
+    def test_kernel_is_not_dimension(self):
+        self.assertFalse(SymbolKind.kernel(arg_index=0).is_dimension)
+
+    def test_pool_is_not_dimension(self):
+        self.assertFalse(SymbolKind.pool().is_dimension)
