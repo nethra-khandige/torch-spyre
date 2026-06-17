@@ -87,9 +87,10 @@ class OpSpec:
     args: Sequence[TensorArg]
     op_info: dict[str, Any]
     tiled_symbols: list[Symbol] = dataclasses.field(default_factory=list)
-    # Maps PyTorch symbol name (e.g. 's97') -> (min, max, hint) bounds from mark_dynamic.
-    # Populated by compute_symbolic_bounds during create_op_spec; empty for concrete dims.
-    symbolic_dim_bounds: dict[str, tuple[int, int, int]] = dataclasses.field(
+    # Maps PyTorch symbol name (e.g. 's97') -> (max, granularity) bounds.
+    # Populated by compute_symbolic_bounds during
+    # create_op_spec; empty for concrete dims.
+    symbolic_dim_bounds: dict[str, tuple[int, int]] = dataclasses.field(
         default_factory=dict
     )
 

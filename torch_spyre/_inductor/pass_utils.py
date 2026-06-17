@@ -273,11 +273,12 @@ def compute_max_size(expr: Union[Expr, int]) -> int:
     return V.graph.sizevars.size_hint(expr)
 
 
-def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int, int] | None":
-    """Return (min, max, hint) bounds for a symbolic expression from ShapeEnv.
+def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int] | None":
+    """Return (max_size, granularity) bounds for a symbolic expression from ShapeEnv.
 
     Returns None for concrete expressions (no free symbols).
-    Bounds are populated by mark_dynamic(min=..., max=...) at trace time.
+    max_size is the computed maximum size,
+    granularity from compute_granularity.
     """
     if isinstance(expr, (int, sympy.Integer)):
         return None
@@ -286,20 +287,11 @@ def compute_symbolic_bounds(expr: Union[Expr, int]) -> "tuple[int, int, int] | N
     shape_env = V.graph.sizevars.shape_env
     if shape_env is None:
         return None
-    vr = shape_env.bound_sympy(expr)
-    if vr is None:
-        return None
-    lower = (
-        int(vr.lower)
-        if isinstance(vr.lower, sympy.Integer) and vr.lower.is_finite
-        else 0
-    )
-    upper = (
-        int(vr.upper)
-        if isinstance(vr.upper, sympy.Integer) and vr.upper.is_finite
-        else V.graph.sizevars.size_hint(expr)
-    )
-    return (lower, upper, V.graph.sizevars.size_hint(expr))
+
+    max_size = compute_max_size(expr)
+    granularity = compute_granularity(expr, max_size)
+
+    return (max_size, granularity)
 
 
 def get_mem_deps_from_rw(read_writes: ReadWrites) -> list[SchedNodeArg]:

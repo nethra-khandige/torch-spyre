@@ -279,6 +279,23 @@ def gen_coord_info_value(
     )
 
 
+def _per_core_symbolic_dim_info(symbolic_dims: dict, work_slices: dict) -> dict:
+    """Per-core ``symbolicDimInfo_`` block: granularity_/maxSize_ divided by
+    each dim's work_slices.
+
+    Shared by the ``ss_`` and ``el_`` sub-dicts of ``dataStageParam_``, which
+    must stay byte-for-byte identical -- factored out so the two never drift.
+    """
+    info = {}
+    for dim_name, (_, granularity, max_val) in symbolic_dims.items():
+        wk_slices = work_slices[Symbol(dim_name)]
+        info[dim_name] = {
+            "maxSize_": max_val // wk_slices,
+            "granularity_": max(1, granularity // wk_slices),
+        }
+    return info
+
+
 def _tiled_byte_stride(tensor, tiled_sym, iteration_space) -> int:
     """Byte stride per loop iteration for a single tiled dimension.
 
@@ -342,12 +359,12 @@ def generate_sdsc(
     # Dim symbols carry no HBM byte value; 0 is appended to `symbols` as a placeholder.
     dim_local_symbols: dict[str, int] = {}  # pytorch_sym_name -> negative symbol ID
     dim_symbol_kinds: list[SymbolKind] = []
-    for sdsc_dim, (pytorch_sym, per_core_gran, per_core_max) in symbolic_dims.items():
+    for sdsc_dim, (pytorch_sym, granularity, max_value) in symbolic_dims.items():
         if pytorch_sym not in dim_local_symbols:
             sym_id = -(symbol_id_offset + len(dim_symbol_kinds) + 1)
             dim_local_symbols[pytorch_sym] = sym_id
             dim_symbol_kinds.append(
-                SymbolKind.dimension(per_core_gran, per_core_max, pytorch_sym)
+                SymbolKind.dimension(granularity, max_value, pytorch_sym)
             )
             symbols.append(0)  # placeholder: dim symbols have no HBM byte value
     n_dim_syms = len(dim_symbol_kinds)
@@ -534,8 +551,8 @@ def generate_sdsc(
                                         sdsc_dim: [dim_local_symbols[pytorch_sym]]
                                         for sdsc_dim, (
                                             pytorch_sym,
-                                            per_core_gran,
-                                            per_core_max,
+                                            granularity,
+                                            max_value,
                                         ) in symbolic_dims.items()
                                         if pytorch_sym in dim_local_symbols
                                     },
@@ -555,26 +572,9 @@ def generate_sdsc(
                                         # Per-dim symbolic bounds (per-core slice).
                                         # min_val / work_slices is the granularity that
                                         # the runtime must respect when choosing a batch size.
-                                        "symbolicDimInfo_": {
-                                            dim_name: {
-                                                "maxSize_": max_val
-                                                // sdsc_spec.work_slices[
-                                                    Symbol(dim_name)
-                                                ],
-                                                "granularity_": max(
-                                                    1,
-                                                    min_val
-                                                    // sdsc_spec.work_slices[
-                                                        Symbol(dim_name)
-                                                    ],
-                                                ),
-                                            }
-                                            for dim_name, (
-                                                _,
-                                                min_val,
-                                                max_val,
-                                            ) in symbolic_dims.items()
-                                        },
+                                        "symbolicDimInfo_": _per_core_symbolic_dim_info(
+                                            symbolic_dims, sdsc_spec.work_slices
+                                        ),
                                         "maxSymbolicVolume_": {},
                                         "coreletSplit_": {},
                                         "rowSplit_": {},
@@ -588,26 +588,9 @@ def generate_sdsc(
                                             // sdsc_spec.work_slices[dim]
                                             for dim, size in sdsc_spec.iteration_space.items()
                                         },
-                                        "symbolicDimInfo_": {
-                                            dim_name: {
-                                                "maxSize_": max_val
-                                                // sdsc_spec.work_slices[
-                                                    Symbol(dim_name)
-                                                ],
-                                                "granularity_": max(
-                                                    1,
-                                                    min_val
-                                                    // sdsc_spec.work_slices[
-                                                        Symbol(dim_name)
-                                                    ],
-                                                ),
-                                            }
-                                            for dim_name, (
-                                                _,
-                                                min_val,
-                                                max_val,
-                                            ) in symbolic_dims.items()
-                                        },
+                                        "symbolicDimInfo_": _per_core_symbolic_dim_info(
+                                            symbolic_dims, sdsc_spec.work_slices
+                                        ),
                                         "maxSymbolicVolume_": {},
                                         "coreletSplit_": {},
                                         "rowSplit_": {},

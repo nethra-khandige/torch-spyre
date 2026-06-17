@@ -92,8 +92,10 @@ class SDSCSpec:
     args: list[SDSCArgs]
     constants: dict[str, Any]
     coordinate_masking: dict[Symbol, Any]
-    # maps SDSC dim name -> (pytorch_sym_name, min_val, max_val)
-    symbolic_dims: dict = dataclasses.field(default_factory=dict)
+    # maps SDSC dim name -> (pytorch_sym_name, granularity, max_val)
+    symbolic_dims: dict[str, tuple[str, int, int]] = dataclasses.field(
+        default_factory=dict
+    )
 
     def __str__(self) -> str:
         iter_space = ", ".join(f"{k}={v}" for k, v in self.iteration_space.items())
@@ -472,7 +474,7 @@ def _resolve_sdsc_size(expr: Expr, symbolic_dim_bounds: dict) -> int:
     if hasattr(expr, "free_symbols") and expr.free_symbols:
         sym_name = str(next(iter(expr.free_symbols)))
         if sym_name in symbolic_dim_bounds:
-            return symbolic_dim_bounds[sym_name][1]  # max
+            return symbolic_dim_bounds[sym_name][0]  # max
     return _concretize_for_sdsc(expr)
 
 
@@ -577,16 +579,16 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         for sym, (size, _) in op_spec.iteration_space.items()
     }
 
-    # Build the SDSC dim name -> (pytorch_sym_name, min_val, max_val) map for
-    # any iteration-space dims that are backed by mark_dynamic symbolic shapes.
+    # Build the SDSC dim name -> (pytorch_sym_name, granularity, max_val) map
+    # for any iteration-space dims.
     # This drives symbolicDimInfo_ and dimToSymbolMapping_ in the generated JSON.
     symbolic_dims: dict[str, tuple[str, int, int]] = {}
     for sym, (size_expr, _) in op_spec.iteration_space.items():
         sdsc_dim_name = str(symbol_mapping[sym])
         sym_str = str(size_expr)
         if sym_str in op_spec.symbolic_dim_bounds:
-            min_val, max_val, _ = op_spec.symbolic_dim_bounds[sym_str]
-            symbolic_dims[sdsc_dim_name] = (sym_str, min_val, max_val)
+            granularity, max_val = op_spec.symbolic_dim_bounds[sym_str]
+            symbolic_dims[sdsc_dim_name] = (sym_str, granularity, max_val)
 
     dim_splits = {
         symbol_mapping[dim]: value[-1] for dim, value in op_spec.iteration_space.items()

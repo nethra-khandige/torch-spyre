@@ -583,10 +583,11 @@ class SpyreKernel(Kernel[CSEVariable]):
                 if n_output_syms + r < len(it_space_keys)
             ]
 
-        # Collect (min, max, hint) bounds for any symbolic iteration-space dims.
-        # These are passed through OpSpec so SDSC codegen can emit symbolicDimInfo_
-        # without needing the live ShapeEnv (which is gone during the codegen phase).
-        symbolic_dim_bounds: dict[str, tuple[int, int, int]] = {}
+        # Collect (max, granularity) bounds for any symbolic iteration-space
+        # dims. These are passed through OpSpec so SDSC codegen can emit
+        # symbolicDimInfo_ without needing the live ShapeEnv (which is gone
+        # during the codegen phase).
+        symbolic_dim_bounds: dict[str, tuple[int, int]] = {}
         for _, (size_expr, _) in it_space_extended.items():
             bounds = compute_symbolic_bounds(size_expr)
             if bounds is not None:

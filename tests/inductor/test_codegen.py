@@ -70,7 +70,7 @@ class TestSpyreConfig(InductorTestCase):
     def test_sencores_16(self):
         fn = torch.abs
         x = torch.randn((256, 128, 512)).to("spyre")
-        cfn = torch.compile(fn, dynamic=False)
+        cfn = torch.compile(fn)
         out, source_codes = run_and_get_code(cfn, x)
         # print("test_sencores 16")
         # print(source_codes[0])
@@ -211,9 +211,9 @@ class TestResolveSdscSize(InductorTestCase):
         self.assertEqual(_resolve_sdsc_size(128, {}), 128)
 
     def test_symbolic_in_bounds_returns_max(self):
-        # bounds carries (min, max, hint); index [1] is max.
+        # bounds carries (max, granularity); index [0] is max.
         s0 = sympy.Symbol("s0", integer=True, positive=True)
-        self.assertEqual(_resolve_sdsc_size(s0, {"s0": (64, 1024, 512)}), 1024)
+        self.assertEqual(_resolve_sdsc_size(s0, {"s0": (1024, 64)}), 1024)
 
     def test_symbolic_not_in_bounds_falls_back_to_size_hint(self):
         # Symbol absent from bounds → _concretize_for_sdsc → size_hint.
