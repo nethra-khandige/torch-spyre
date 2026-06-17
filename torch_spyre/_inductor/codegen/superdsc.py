@@ -587,7 +587,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         sdsc_dim_name = str(symbol_mapping[sym])
         sym_str = str(size_expr)
         if sym_str in op_spec.symbolic_dim_bounds:
-            granularity, max_val = op_spec.symbolic_dim_bounds[sym_str]
+            max_val, granularity = op_spec.symbolic_dim_bounds[sym_str]
             symbolic_dims[sdsc_dim_name] = (sym_str, granularity, max_val)
 
     dim_splits = {
