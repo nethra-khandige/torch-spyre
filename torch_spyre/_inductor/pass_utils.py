@@ -151,11 +151,6 @@ def compute_granularity(expr: Expr, max_size: int) -> int:
     Callers must only invoke this for symbolic ``expr``. See #2284,
     #2287, #2288, #2289 for the full design.
 
-    Wiring: this helper has no call sites yet. The pointwise
-    work-division PR (#2499) will plug it into the ``size_hint`` call
-    sites in ``work_division.py`` and ``codegen/superdsc.py``,
-    alongside ``compute_max_size``.
-
     Deferred: when the symbolic dim is the stick dim of its tensor the
     granularity also needs to be a multiple of ``elems_per_stick(dtype)``.
     Handled in a follow-up once the stick-dim symbolic path is enabled.
@@ -262,9 +257,6 @@ def compute_max_size(expr: Union[Expr, int]) -> int:
     back to ``size_hint`` when no finite upper bound exists.
 
     Needed for dynamic shape support.
-
-    # TODO: To be used in size_hint call-sites in superdsc.py and work_division.py
-    #       to get the maxSize in SDSC and work planning respectively
     """
     if isinstance(expr, int):
         return expr
