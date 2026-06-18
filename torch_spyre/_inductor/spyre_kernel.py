@@ -45,6 +45,7 @@ from .pass_utils import (
     concretize_expr,
     concretize_index,
     compute_symbolic_bounds,
+    _finite_upper_or_none,
     apply_splits_from_index_coeff,
     iteration_space,
     indirect_access_subs_from_kernel,
@@ -589,6 +590,14 @@ class SpyreKernel(Kernel[CSEVariable]):
         # during the codegen phase).
         symbolic_dim_bounds: dict[str, tuple[int, int]] = {}
         for _, (size_expr, _) in it_space_extended.items():
+            if not (hasattr(size_expr, "free_symbols") and size_expr.free_symbols):
+                continue
+            if _finite_upper_or_none(size_expr) is None:
+                logger.debug(
+                    f"[work_division/symbolic] skipping auto-dynamic symbol "
+                    f"{size_expr}; use mark_dynamic(max=...) to enable symbolic planning"
+                )
+                continue
             bounds = compute_symbolic_bounds(size_expr)
             if bounds is not None:
                 symbolic_dim_bounds[str(size_expr)] = bounds
