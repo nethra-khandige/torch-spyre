@@ -128,7 +128,7 @@ def _user_min_or_none(expr: Expr) -> Optional[int]:
     return None if lower == _SHAPE_ENV_DEFAULT_LOWER else lower
 
 
-def _finite_upper_or_none(expr: Expr) -> Optional[int]:
+def finite_upper_or_none(expr: Expr) -> Optional[int]:
     """Return the ShapeEnv finite upper bound for ``expr``, or ``None``.
     A bound is usable iff it is a positive concrete
     ``sympy.Integer``; ``sympy.oo``, non-integers, and non-positive
@@ -167,7 +167,7 @@ def compute_granularity(expr: Expr, max_size: int) -> int:
     # mark_dynamic(max=...). The granularity is then only as trustworthy
     # as that hint -- warn the user so they can pin it explicitly with
     # mark_dynamic(max=...).
-    if _finite_upper_or_none(expr) is None:
+    if finite_upper_or_none(expr) is None:
         warnings.warn(
             f"max for symbolic dim {expr} came from size_hint, not from "
             f"mark_dynamic(max=...). Proceeding with max={max_size} as a "
@@ -264,7 +264,7 @@ def compute_max_size(expr: Union[Expr, int]) -> int:
         return int(expr)
     if not (hasattr(expr, "free_symbols") and expr.free_symbols):
         return int(expr)
-    bound = _finite_upper_or_none(expr)
+    bound = finite_upper_or_none(expr)
     if bound is not None:
         return bound
     return V.graph.sizevars.size_hint(expr)

@@ -496,7 +496,7 @@ def align_tensors(
     orig_ranges = {var: val[0] for var, val in iteration_space.items()}
     # local import: pass_utils imports compute_coordinates/matching_dim from
     # this module, so importing at module scope would create a cycle.
-    from .pass_utils import _finite_upper_or_none
+    from .pass_utils import finite_upper_or_none
 
     def _bounded_or_hint(expr, hint):
         """Return ``expr`` unless it's an unbounded symbolic expression.
@@ -507,7 +507,7 @@ def align_tensors(
         the concretized ``hint`` instead of propagating an unbounded symbol.
         """
         if hasattr(expr, "free_symbols") and expr.free_symbols:
-            if _finite_upper_or_none(expr) is None:
+            if finite_upper_or_none(expr) is None:
                 return hint
         return expr
 

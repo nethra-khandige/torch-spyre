@@ -707,7 +707,7 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
     )
 
     # For symbolic dims, use the max from symbolic_dim_bounds as the iteration-space size
-    # so the emitted SDSC JSON is generated with max
+    # so the emitted SDSC JSON is generated max sizes baked in, not symbols.
     sdsc_iteration_space = {
         symbol_mapping[sym]: _resolve_sdsc_size(size, op_spec.symbolic_dim_bounds)
         for sym, (size, _) in op_spec.iteration_space.items()

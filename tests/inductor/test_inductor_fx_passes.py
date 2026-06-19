@@ -268,7 +268,7 @@ class TestPassUtils(unittest.TestCase):
         with patch("torch_spyre._inductor.pass_utils.V", mock_v):
             assert compute_max_size(s) == 64
 
-        # Edge case: the ``_finite_upper_or_none`` predicate filters
+        # Edge case: the ``finite_upper_or_none`` predicate filters
         # non-positive bounds (``int(vr.upper) > 0``). Zero upper must
         # fall through to size_hint just like sympy.oo does.
         mock_v = self._mock_v(upper=sympy.Integer(0), size_hint=42)
