@@ -36,13 +36,11 @@ logger = get_inductor_logger("sdsc_compile")
 # Compiled SDSC entry: (json_dict, base_symbol_values, affine_strides, symbol_kinds)
 #   base_symbol_values: list[int] of base HBM byte offsets for this SDSC,
 #                       one per registered symbol ID
-#   affine_strides:     list[list[dict]] — per tensor, per loop-nesting level
-#                       (outermost first).  Each inner dict maps
-#                       tiled_sym -> stride_bytes for that level's symbols.
-#                       [{} for _ in tiled_symbols] for non-tiled / lx tensors
-#                       (one empty dict per level, preserving the level count).
+#   affine_strides:     list[dict] parallel to SDSCSpec.args —
+#                       {tiled_sym: stride_bytes} for tiled HBM tensors,
+#                       empty dict for non-tiled / lx tensors
 #   symbol_kinds:       list[SymbolKind] parallel to base_symbol_values
-_CompiledEntry = tuple[Any, list[int], list[list[dict]], list[SymbolKind]]
+_CompiledEntry = tuple[Any, list[int], list[dict], list[SymbolKind]]
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +52,6 @@ def generate_bundle(
     kernel_name: str,
     output_dir: str,
     specs: Sequence,
-    use_symbols: bool | None = None,
     unroll_loops: bool | None = None,
     symbolic_args: bool | None = None,
 ):
@@ -62,11 +59,6 @@ def generate_bundle(
 
     ``specs`` is a list of ``OpSpec | LoopSpec`` entries (nested ``LoopSpec``
     entries are supported).
-
-    ``use_symbols`` controls whether HBM tensor addresses are emitted as
-    runtime symbols (``%sym_N`` constants) in ``bundle.mlir`` with
-    ``affine.apply`` indirection.  When ``None`` (the default) the value is
-    read from ``config.bundle_hbm_symbols``.
 
     ``unroll_loops`` controls whether ``LoopSpec`` nodes are fully unrolled
     into flat ``OpSpec`` nodes before bundle generation.  When ``None`` (the
@@ -80,20 +72,16 @@ def generate_bundle(
     and produce ``scf.for`` loops in the generated ``bundle.mlir``.
 
     ``symbolic_args`` controls the function signature of ``@sdsc_bundle``.
-    When ``False`` (default), ``sdsc_execute`` has no operands.
-    When ``True``, addresses are emitted as ``!sdscbundle.input_arg<index>``
-    parameters; this also forces ``use_symbols=True`` implicitly.  When
+    When ``False`` (default), HBM addresses are baked as concrete integers and
+    ``sdsc_execute`` has no operands.  When ``True``, addresses are emitted as
+    runtime symbols with ``!sdscbundle.input_arg<index>`` parameters.  When
     ``None``, the value is read from ``config.bundle_symbolic_args``.
     """
-    if use_symbols is None:
-        use_symbols = _spyre_config.bundle_hbm_symbols
     if unroll_loops is None:
         unroll_loops = _spyre_config.unroll_loops
     if symbolic_args is None:
         symbolic_args = _spyre_config.bundle_symbolic_args
-    # symbolic_args requires symbol emission — if it is set, ensure use_symbols is too.
-    if symbolic_args:
-        use_symbols = True
+    use_symbols = symbolic_args
 
     specs_list: list = unroll_loop_specs(list(specs)) if unroll_loops else list(specs)
 
@@ -127,16 +115,13 @@ def generate_bundle(
     _collect_loop_bounds(specs_list, loop_bounds)
 
     # Affine map deduplication: stride_key -> map index (0-based).
-    # A stride_key is a tuple of stride values in outermost-first level order.
-    # Strides from each level are appended in level order; within a level, in
-    # symbol dict insertion order.  The corresponding loop-var indices are built
-    # from the explicit level index, so each stride is mapped to the correct
-    # loop variable regardless of nesting depth.
+    # A stride_key is a tuple of (stride,) values — one per tiled loop variable
+    # that advances this tensor.  For a single-level loop with one tiled sym the
+    # key is (stride_bytes,).
     #
     # affine_map_loop_var_indices: parallel to compiled, per op a list of
     # per-tensor loop-var index lists.  Each inner list records which positions
-    # in the enclosing loop_vars list correspond to the strides in stride_key,
-    # one entry per non-zero stride in outermost-first level order.
+    # in the enclosing loop_vars list correspond to the strides in stride_key.
     # _emit_specs uses this to pass only the relevant loop vars to affine.apply.
     affine_map_index: dict[tuple, int] = {}
     affine_map_loop_var_indices: list[list[list[int]]] = []
@@ -147,14 +132,37 @@ def generate_bundle(
     compiled_iter = iter(compiled)
     addr_counter = [0]
 
-    # Build a per-symbol kind list from compiled entries (symbolic_args path only).
+    # Build a per-symbol kind list from compiled entries.  Dimension symbols
+    # (from mark_dynamic) are registered by compile_op_spec regardless of
+    # symbolic_args/use_symbols — that flag only controls HBM-address
+    # symbolization — so this list (and the dimension-symbol handling below) is
+    # built unconditionally; it is simply empty when there is nothing to report.
+    # sym_idx_to_dim_origin maps a "dimension" symbol's global sym_idx to
+    # (sdsc_idx, local_dim_ordinal): the SDSC it was first registered in and its
+    # 1-based position among that SDSC's dimension symbols.  Used below to name
+    # the deduplicated function parameter for that dimension (e.g. "%sym_0_1").
     symbol_kinds: list[SymbolKind] = []
-    if symbolic_args and use_symbols:
-        for _, _, _, local_kinds in compiled:
-            symbol_kinds.extend(local_kinds)
+    # print(f"[bundle.py]compiled:{compiled}")
+    sym_idx_to_dim_origin: dict[int, tuple[int, int]] = {}
+    for sdsc_idx, (_, _, _, local_kinds) in enumerate(compiled):
+        print(f"[bundle.py]local_kinds:{local_kinds}")
+        print(f"[bundle.py]sdsc_idx:{sdsc_idx}")
+        local_dim_ordinal = 0
+        for lk in local_kinds:
+            if lk.is_dimension:
+                local_dim_ordinal += 1
+                sym_idx_to_dim_origin[len(symbol_kinds)] = (
+                    sdsc_idx,
+                    local_dim_ordinal,
+                )
+            print(f"sym_idx_to_dim_origin:{sym_idx_to_dim_origin}")
+            print(f"symbol_kinds:{symbol_kinds}")
+            symbol_kinds.append(lk)
 
     # Determine whether a pool parameter is needed (any pool symbol present).
-    has_pool = symbolic_args and use_symbols and any(sk.is_pool for sk in symbol_kinds)
+    has_pool = (
+        symbolic_args and bool(symbol_kinds) and any(sk.is_pool for sk in symbol_kinds)
+    )
     # Indices of kernel-base symbols that become input_arg parameters.
     # Deduplicated by address value: multiple SDSCs may register the same kernel arg
     # address independently (no cross-SDSC dedup in generate_sdsc), so we keep only
@@ -163,7 +171,7 @@ def generate_bundle(
     # kernel_dup_canonical: maps duplicate kernel sym_idx → canonical sym_idx.
     kernel_arg_sym_indices: list[int] = []
     kernel_dup_canonical: dict[int, int] = {}  # duplicate sym_idx → canonical sym_idx
-    if symbolic_args and use_symbols:
+    if symbolic_args:
         seen_kernel_addr: dict[int, int] = {}  # address → canonical sym_idx
         for i, kind_i in enumerate(symbol_kinds):
             if kind_i.kind == "kernel":
@@ -173,6 +181,34 @@ def generate_bundle(
                     kernel_arg_sym_indices.append(i)
                 else:
                     kernel_dup_canonical[i] = seen_kernel_addr[addr]
+
+    # Indices of dimension symbols (from mark_dynamic) that become input_arg
+    # parameters.  Deduplicated by pytorch_sym: the same dynamic-shape symbol may
+    # be registered independently (with its own local negative ID) by every SDSC
+    # that reads it, so we keep only the first sym_idx per unique pytorch_sym and
+    # map subsequent duplicates to it — mirroring the kernel-arg dedup above.
+    # Unlike the kernel-arg dedup, this runs regardless of symbolic_args: dynamic
+    # shapes are emitted as input_arg params even when HBM addresses are baked.
+    dimension_sym_indices: list[int] = []
+    dimension_dup_canonical: dict[int, int] = {}  # duplicate sym_idx → canonical sym_idx
+    seen_dim_sym: dict[str, int] = {}  # pytorch_sym → canonical sym_idx
+    for i, kind_i in enumerate(symbol_kinds):
+        if kind_i.is_dimension:
+            key = kind_i.pytorch_sym
+            if key not in seen_dim_sym:
+                seen_dim_sym[key] = i
+                dimension_sym_indices.append(i)
+            else:
+                dimension_dup_canonical[i] = seen_dim_sym[key]
+    # Canonical parameter name per dimension symbol, e.g. "%sym_0_1" — named after
+    # the (sdsc_idx, local_dim_ordinal) of its first registration.
+    dim_param_names: dict[int, str] = {
+        sym_idx: (
+            f"%sym_{sym_idx_to_dim_origin[sym_idx][0]}"
+            f"_{sym_idx_to_dim_origin[sym_idx][1]}"
+        )
+        for sym_idx in dimension_sym_indices
+    }
 
     with open(os.path.join(output_dir, "bundle.mlir"), "w") as f:
         logger.info(f"Generating {f.name}")
@@ -193,13 +229,26 @@ def generate_bundle(
         #   - one !sdscbundle.input_arg<index> param per kernel tensor arg, with a
         #     descriptive formal name %arg_{arg_index}_base_addr; the short form
         #     %arg_{arg_index} is used in the body after input_arg_extract
-        if symbolic_args and use_symbols and (has_pool or kernel_arg_sym_indices):
+        #   - one !sdscbundle.input_arg<index, granularity=G, max_value=M> param per
+        #     unique dynamic-shape (mark_dynamic) symbol, with a descriptive formal
+        #     name %sym_{a}_{b}_base; the short form %sym_{a}_{b} is used in the
+        #     body after input_arg_extract — sdsc_execute operands must all be
+        #     plain `index`, same as kernel/pool addresses.  Emitted whenever
+        #     present, independent of symbolic_args (which only governs the pool/
+        #     kernel-address params below).
+        if has_pool or kernel_arg_sym_indices or dimension_sym_indices:
             params = []
             if has_pool:
                 params.append("%pool_base_addr: !sdscbundle.input_arg<index>")
             for sym_idx in kernel_arg_sym_indices:
                 ai = symbol_kinds[sym_idx].arg_index
                 params.append(f"%arg_{ai}_base_addr: !sdscbundle.input_arg<index>")
+            for sym_idx in dimension_sym_indices:
+                sk = symbol_kinds[sym_idx]
+                params.append(
+                    f"{dim_param_names[sym_idx]}_base: !sdscbundle.input_arg<index, "
+                    f"granularity={sk.granularity}, max_value={sk.max_value}>"
+                )
             f.write(f"\tfunc.func @sdsc_bundle({', '.join(params)}) {{\n")
             if has_pool:
                 f.write(
@@ -211,6 +260,15 @@ def generate_bundle(
                 f.write(
                     f"\t\t%arg_{ai} = sdscbundle.input_arg_extract value from"
                     f" %arg_{ai}_base_addr : !sdscbundle.input_arg<index> -> index\n"
+                )
+            for sym_idx in dimension_sym_indices:
+                sk = symbol_kinds[sym_idx]
+                name = dim_param_names[sym_idx]
+                f.write(
+                    f"\t\t{name} = sdscbundle.input_arg_extract value from"
+                    f" {name}_base : !sdscbundle.input_arg<index, "
+                    f"granularity={sk.granularity}, max_value={sk.max_value}>"
+                    " -> index\n"
                 )
         else:
             f.write("\tfunc.func @sdsc_bundle() {\n")
@@ -247,6 +305,15 @@ def generate_bundle(
             for dup_idx in kernel_dup_canonical
             if dup_idx in kernel_sym_to_arg_idx
         }
+        # Dimension symbols (canonical + duplicates) resolve directly to their
+        # input_arg function parameter — no addi/extract involved.
+        sym_canonical.update(
+            (sym_idx, dim_param_names[sym_idx]) for sym_idx in dimension_sym_indices
+        )
+        sym_canonical.update(
+            (dup_idx, dim_param_names[canon_idx])
+            for dup_idx, canon_idx in dimension_dup_canonical.items()
+        )
         # derived_addi_emitted[(arg_index, offset)] → SSA name already emitted
         derived_addi_emitted: dict[tuple[int, int], str] = {}
         # pool_addi_emitted[pool_offset_value] → SSA name already emitted
@@ -286,6 +353,8 @@ def generate_bundle(
                     )
                     pool_addi_emitted[value] = addi_ssa
                 sym_canonical[sym_idx] = pool_addi_emitted[value]
+            elif sk is not None and sk.is_dimension:
+                continue  # replaced by function parameter; resolved via sym_canonical
             else:
                 f.write(f"\t\t%sym_{sym_idx + 1} = arith.constant {value} : index\n")
 
@@ -397,13 +466,7 @@ def _collect_affine_maps(
     entry per OpSpec to ``loop_var_indices_out``.  Each entry is a list of
     per-tensor index lists: ``loop_var_indices_out[op_idx][tensor_idx]`` is
     the list of loop-var positions (into the enclosing ``loop_vars`` list at
-    emit time) that correspond to the strides in the tensor's stride_key,
-    in outermost-first level order.
-
-    ``affine_strides[tensor_idx]`` is a list of dicts, one per loop-nesting
-    level (outermost first).  We iterate over levels explicitly and use
-    ``loop_var_depth[level_idx]`` to find the correct loop variable for each
-    level's strides — no counting from the end.
+    emit time) that correspond to the strides in the tensor's stride_key.
     """
     for entry in specs:
         if isinstance(entry, LoopSpec):
@@ -417,29 +480,22 @@ def _collect_affine_maps(
         elif isinstance(entry, OpSpec):
             _, _, affine_strides, _ = next(compiled_iter)
             per_tensor_lv_indices: list[list[int]] = []
-            for per_level_strides in affine_strides:
-                # per_level_strides is list[dict], one dict per level (outermost first).
-                # Build stride_key and lv_indices by iterating levels explicitly.
-                stride_vals: list[int] = []
-                lv_idxs: list[int] = []
-                for level_idx, level_strides in enumerate(per_level_strides):
-                    if not level_strides:
-                        continue
-                    assert level_idx < len(loop_var_depth), (
-                        f"affine_strides has {len(per_level_strides)} levels but "
-                        f"only {len(loop_var_depth)} enclosing loop(s); "
-                        "create_op_spec built more tiled_syms levels than LoopSpec ancestors"
-                    )
-                    lv = loop_var_depth[level_idx]
-                    for stride in level_strides.values():
-                        stride_vals.append(stride)
-                        lv_idxs.append(lv)
-                if not stride_vals:
+            for tensor_strides in affine_strides:
+                if not tensor_strides:
                     per_tensor_lv_indices.append([])
                     continue
-                stride_key = tuple(stride_vals)
+                # Build stride key from the tiled symbols present in this tensor,
+                # in the order they appear in affine_strides dict.
+                stride_key = tuple(tensor_strides.values())
                 if stride_key not in affine_map_index:
                     affine_map_index[stride_key] = len(affine_map_index)
+                # Record which loop-var positions (in the enclosing loop_vars
+                # list) correspond to each stride entry.  tiled_symbols is
+                # ordered outermost-first (see spyre_kernel.py), so a K-only
+                # tiled op at nesting depth 2 has stride_key length 1 and we
+                # want the innermost loop var — hence we take the *last*
+                # len(stride_key) entries of loop_var_depth.
+                lv_idxs = list(loop_var_depth[-len(stride_key) :])
                 per_tensor_lv_indices.append(lv_idxs)
             loop_var_indices_out.append(per_tensor_lv_indices)
 
@@ -488,12 +544,14 @@ def _emit_specs(
 
     def _resolve_sym(sid: int) -> str:
         # sid is a negative symbol ID; abs(sid)-1 is the 0-based index into symbols[].
+        # kernel_arg_sym_to_name/sym_canonical are empty dicts when their respective
+        # features are inactive, so checking them unconditionally is safe — this
+        # lets dimension-symbol resolution work independent of symbolic_args.
         sym_idx = abs(sid) - 1
-        if symbolic_args:
-            if sym_idx in kernel_arg_sym_to_name:
-                return kernel_arg_sym_to_name[sym_idx]
-            if sym_idx in sym_canonical:
-                return sym_canonical[sym_idx]
+        if sym_idx in kernel_arg_sym_to_name:
+            return kernel_arg_sym_to_name[sym_idx]
+        if sym_idx in sym_canonical:
+            return sym_canonical[sym_idx]
         return f"%sym_{abs(sid)}"
 
     tab = "\t" * indent
@@ -540,31 +598,23 @@ def _emit_specs(
 
             # Build affine.apply ops for tiled tensors, tracking which
             # symbol IDs have been upgraded to per-iteration %addr_N names.
-            # affine_strides[tensor_idx] is list[dict] (per level, outermost first).
             sym_id_to_operand: dict[int, str] = {}
-            for tensor_idx, per_level_strides in enumerate(affine_strides):
-                # Flatten per-level strides to build the stride_key in the same
-                # outermost-first order used by _collect_affine_maps.
-                flat_strides: list[int] = [
-                    stride
-                    for level_strides in per_level_strides
-                    for stride in level_strides.values()
-                ]
-                if not flat_strides:
+            for tensor_idx, tensor_strides in enumerate(affine_strides):
+                if not tensor_strides:
                     continue
                 num_cores = _sdsc_num_cores(sdsc_json)
                 for c in range(num_cores):
                     base_sym_id = _get_tensor_core_sym_id(sdsc_json, tensor_idx, c)
                     if base_sym_id is None or base_sym_id in sym_id_to_operand:
                         continue
-                    stride_key = tuple(flat_strides)
+                    stride_key = tuple(tensor_strides.values())
                     map_idx = affine_map_index[stride_key]
                     addr_name = f"%addr_{addr_counter[0]}"
                     addr_counter[0] += 1
                     base_addr_name = _resolve_sym(base_sym_id)
-                    # lv_indices[tensor_idx] was built by _collect_affine_maps using
-                    # explicit level indexing — each entry is the loop_vars position
-                    # for the corresponding stride in stride_key.
+                    # Select only the loop vars that correspond to the strides
+                    # for this tensor (may be a subset of all enclosing loop vars
+                    # when the op is not tiled on every enclosing loop level).
                     lv_indices = per_tensor_lv_indices[tensor_idx]
                     apply_loop_vars = [loop_vars[i] for i in lv_indices]
                     loop_var_str = ", ".join(apply_loop_vars)
@@ -581,7 +631,11 @@ def _emit_specs(
             ]
 
             operand_str = ", ".join(operands)
-            if use_symbols:
+            # Whether to attach operands/symbol_ids is driven by whether there are
+            # any symbol ids to report (dimension and/or address), not by
+            # use_symbols alone — dimension symbols can be present even when HBM
+            # addresses are baked as concrete constants (use_symbols=False).
+            if symbol_ids:
                 symbol_ids_str = ", ".join(str(i) for i in symbol_ids)
                 f.write(
                     f"{tab}sdscbundle.sdsc_execute ({operand_str}) "
@@ -596,12 +650,24 @@ def _emit_specs(
 
 
 def _extract_symbol_ids(sdsc_json: dict) -> list[int]:
-    """Extract all negative symbol IDs from the SDSC JSON startAddressCoreCorelet_ data."""
+    """Extract all negative symbol IDs from an SDSC JSON, dimension IDs first.
+
+    Dimension symbols (``dimToSymbolMapping_``, registered by mark_dynamic) are
+    always allocated lower-magnitude negative IDs than HBM address symbols (see
+    ``compute_ops.generate_sdsc``), so collecting them first here keeps ``ids``
+    in ascending-magnitude order without needing to sort.
+    """
     ids: list[int] = []
     seen: set[int] = set()
     for top_val in sdsc_json.values():
         for dsc_entry in top_val.get("dscs_", []):
             for op_val in dsc_entry.values():
+                for dim_syms in op_val.get("dimToSymbolMapping_", {}).values():
+                    for v in dim_syms:
+                        sym_id = int(v)
+                        if sym_id < 0 and sym_id not in seen:
+                            ids.append(sym_id)
+                            seen.add(sym_id)
                 for node in op_val.get("scheduleTree_", []):
                     if node.get("component_") == "hbm":
                         data = node.get("startAddressCoreCorelet_", {}).get("data_", {})
