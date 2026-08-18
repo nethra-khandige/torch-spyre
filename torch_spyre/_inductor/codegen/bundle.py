@@ -218,13 +218,35 @@ def generate_bundle(
 
         f.write("module {\n")
 
+        # EXPERIMENTAL (symbolic loop trip counts): a loop_bounds entry that
+        # isn't a plain integer gets its own runtime input_arg, mirroring the
+        # dimension-symbol pattern below (same !sdscbundle.input_arg<index>
+        # type sdscbundle already uses for mark_dynamic tensor-shape symbols).
+        # This proves the sdscbundle dialect / downstream MLIR pipeline can
+        # accept a genuinely runtime-valued scf.for bound -- it does NOT wire
+        # up a real producer of such a count (WSR, work division, and the
+        # runtime dispatch path still only ever hand this function concrete
+        # integers). See docs/wsr-notes.md section 9 for the full gap list.
+        symbolic_loop_bounds = [
+            (lb_idx, lb)
+            for lb_idx, lb in enumerate(loop_bounds)
+            if not isinstance(lb, (int, sympy.Integer))
+        ]
+
         # Function signature:
         #   - optional leading %pool_base_addr param for pool-allocated tensors
         #   - one !sdscbundle.input_arg<index> param per kernel tensor arg
         #   - one !sdscbundle.input_arg<index, granularity=G, max_value=M> param
         #     per unique dynamic-shape (mark_dynamic) symbol; emitted whenever
         #     present.
-        if has_pool or kernel_arg_sym_indices or dimension_sym_indices:
+        #   - one !sdscbundle.input_arg<index> param per symbolic loop bound
+        #     (EXPERIMENTAL, see comment above).
+        if (
+            has_pool
+            or kernel_arg_sym_indices
+            or dimension_sym_indices
+            or symbolic_loop_bounds
+        ):
             params = []
             if has_pool:
                 params.append("%pool_base_addr: !sdscbundle.input_arg<index>")
@@ -235,6 +257,10 @@ def generate_bundle(
                 dim_sk = symbol_kinds[sym_idx]
                 params.append(
                     f"{dim_param_names[sym_idx]}_base: {_dim_input_arg_type(dim_sk)}"
+                )
+            for lb_idx, _lb in symbolic_loop_bounds:
+                params.append(
+                    f"%loop_bound_{lb_idx}_base: !sdscbundle.input_arg<index>"
                 )
             f.write(f"\tfunc.func @sdsc_bundle({', '.join(params)}) {{\n")
             if has_pool:
@@ -255,14 +281,24 @@ def generate_bundle(
                     f"\t\t{name} = sdscbundle.input_arg_extract value from"
                     f" {name}_base : {_dim_input_arg_type(dim_sk)} -> index\n"
                 )
+            for lb_idx, lb in symbolic_loop_bounds:
+                f.write(
+                    f"\t\t%loop_bound_{lb_idx} = sdscbundle.input_arg_extract"
+                    f" value from %loop_bound_{lb_idx}_base"
+                    f" : !sdscbundle.input_arg<index> -> index"
+                    f"  // {lb}\n"
+                )
         else:
             f.write("\tfunc.func @sdsc_bundle() {\n")
 
         # Standard loop constants (only emitted when there are loops).
+        symbolic_lb_idxs = {lb_idx for lb_idx, _lb in symbolic_loop_bounds}
         if loop_bounds:
             f.write("\t\t%c0 = arith.constant 0 : index\n")
             f.write("\t\t%c1 = arith.constant 1 : index\n")
             for lb_idx, lb in enumerate(loop_bounds):
+                if lb_idx in symbolic_lb_idxs:
+                    continue  # already defined above via input_arg_extract
                 f.write(f"\t\t%loop_bound_{lb_idx} = {_mlir_count_value(lb)}\n")
 
         # Emit one declaration per symbol:

@@ -21,6 +21,27 @@ from ..errors import Unsupported
 # An irregular dimension is a dimension with size one or stride zero.
 
 
+def _is_symbolic(x) -> bool:
+    """True if x carries free symbols (e.g. a mark_dynamic dim's SymInt)."""
+    return bool(getattr(x, "free_symbols", None))
+
+
+def _evenly_divides(numer, denom) -> bool:
+    """True if denom is verifiably a divisor of numer.
+
+    EXPERIMENTAL: a symbolic numer (e.g. `s77`, a mark_dynamic dim) can't be
+    checked via `%` -- `Mod(s77, 64) == 0` is never structurally true even
+    when s77 is guaranteed (by the mark_dynamic granularity contract, see
+    docs/wsr-notes.md section 9) to be an exact multiple of 64 at runtime.
+    Symbolic operands are assumed to divide evenly rather than checked,
+    consistent with that contract; only concrete operands are actually
+    verified.
+    """
+    if _is_symbolic(numer) or _is_symbolic(denom):
+        return True
+    return int(numer) % int(denom) == 0
+
+
 def compute_tile_stride(size, stride, tile_size):
     """
     Convert a tensor stride to a tile stride.
@@ -29,7 +50,7 @@ def compute_tile_stride(size, stride, tile_size):
     Cumulative tile counts must divide strides. Padding is reduced in proportion
     of tile counts. Tile strides of irregular tile dimensions are set to zero.
     """
-    if not all(x % y == 0 for x, y in zip(size, tile_size)):
+    if not all(_evenly_divides(x, y) for x, y in zip(size, tile_size)):
         raise Unsupported(f"tile sizes {tile_size} do not divide tensor sizes {size}")
     # exclude irregular tensor dimensions (size==1 or stride==0)
     dims = [d for d, (s, t) in enumerate(zip(size, stride)) if s != 1 and t != 0]
@@ -38,7 +59,7 @@ def compute_tile_stride(size, stride, tile_size):
     tile_stride = [sympy.S.Zero] * len(tile_size)
     running_tile_count = sympy.S.One
     for d in dims:
-        if stride[d] % running_tile_count != 0:
+        if not _evenly_divides(stride[d], running_tile_count):
             raise Unsupported(
                 f"stride {stride[d]} at dim {d} is not divisible by cumulative"
                 f" tile count {running_tile_count}"

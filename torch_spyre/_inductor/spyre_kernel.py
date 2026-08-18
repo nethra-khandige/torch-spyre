@@ -915,7 +915,14 @@ class SpyreKernel(Kernel[CSEVariable]):
                     level_syms.append(self._get_or_mint_level_symbol(lvl, op_name))
                 tiled_syms_per_level_outermost.append(level_syms)
                 if lvl < len(loop_count):
-                    trip_count = int(loop_count[lvl])
+                    # EXPERIMENTAL: loop_count[lvl] may be symbolic (a
+                    # mark_dynamic-driven tile count, e.g. floor(R/G)).
+                    # tiled_symbol_trip_counts is only ever consumed via
+                    # sympy arithmetic downstream (multiplied into
+                    # device_tile_advance_expr), which already tolerates a
+                    # symbolic value -- no int() needed, and it would crash
+                    # here regardless.
+                    trip_count = loop_count[lvl]
                     for sym in level_syms:
                         tiled_symbol_trip_counts[sym] = trip_count
             # Reverse so index 0 = innermost level.
@@ -1357,6 +1364,29 @@ class SpyreKernel(Kernel[CSEVariable]):
                 seen.add(arg)
                 call_args.append(arg)
 
+        # EXPERIMENTAL: append one extra scalar arg per unique symbolic
+        # dynamic-shape symbol (mark_dynamic bound) this kernel's OpSpecs
+        # reference, matching bundle.py's dimension_sym_indices input_arg
+        # parameters one-for-one (see bundle.mlir's `%sym_N_M_base` params,
+        # which are always emitted after the tensor-address params -- same
+        # order call_args builds here). The wrapper's own `call()` scope
+        # already binds e.g. `s77 = arg0_1` near the top for every
+        # dynamic-shape symbol (standard Inductor convention), so the bare
+        # symbol name is a valid Python expression at this point.
+        #
+        # NOT sufficient on its own: launch_jobplan's C++ binding
+        # (torch_spyre/csrc/module.cpp) only accepts
+        # `const std::vector<at::Tensor>&`, and SpyreStream::launch
+        # (spyre_stream.cpp) asserts every element is a Spyre-device tensor
+        # -- passing a plain Python int here is expected to fail at the
+        # pybind11 boundary until that C++ side is also fixed. See
+        # docs/symbolic-loop-poc-changes.md.
+        for op_spec in _iter_op_specs(self.op_specs):
+            for sym_name in getattr(op_spec, "symbolic_dim_bounds", None) or {}:
+                if sym_name not in seen:
+                    seen.add(sym_name)
+                    call_args.append(sym_name)
+
         call_args_str = ", ".join(call_args)
         wrapper.writeline(f"{name}.run({call_args_str})")
         if uses_pool:
@@ -1478,8 +1508,15 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
                         + "],"
                     )
                 if op_spec.tiled_symbol_trip_counts:
+                    # EXPERIMENTAL: count may be symbolic (e.g. floor(s77/64)).
+                    # A bare f-string interpolation emits it as literal Python
+                    # source (`floor(s77/64)`) with no `floor` import in scope
+                    # -- route it through sympy_str() like the key already is,
+                    # so it's parsed via sympify('...') at load time instead.
+                    # Concrete ints keep their exact prior bare-int output.
                     trip_counts_str = ", ".join(
-                        f"{sympy_str(sym)}: {count}"
+                        f"{sympy_str(sym)}: "
+                        f"{count if isinstance(count, (int, sympy.Integer)) else sympy_str(count)}"
                         for sym, count in op_spec.tiled_symbol_trip_counts.items()
                     )
                     buf.writeline(f"tiled_symbol_trip_counts={{{trip_counts_str}}},")

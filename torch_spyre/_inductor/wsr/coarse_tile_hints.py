@@ -53,10 +53,24 @@ def _hints_levels(ops: list[Operation]) -> list[tuple]:
     for op in ops:
         for h in getattr(op, "dim_hints", []):
             prev = best.get(h.hint_id)
+            # EXPERIMENTAL: h.split_count > 1 is unsafe to evaluate directly when
+            # split_count is symbolic (e.g. floor(R/G) from tile_size_per_dim) --
+            # a bare Python `and`/`if` forces bool() on the resulting sympy
+            # Relational, which raises for an undecidable comparison (verified:
+            # `floor(R/64) > 1` returns an unevaluated Relational, and bool() of
+            # that raises TypeError). A symbolic split_count is never the
+            # degenerate "no-op tile of 1" case by construction (G is chosen
+            # smaller than the legal dynamic range), so treat it as satisfying
+            # "> 1" unconditionally rather than attempting the comparison.
+            h_is_bigger = (
+                True
+                if getattr(h.split_count, "free_symbols", None)
+                else h.split_count > 1
+            )
             if (
                 prev is None
                 or prev.loop_var is None
-                or (prev.split_count == 1 and h.split_count > 1)
+                or (prev.split_count == 1 and h_is_bigger)
             ):
                 best[h.hint_id] = h
 
@@ -73,7 +87,10 @@ def _hints_levels(ops: list[Operation]) -> list[tuple]:
                 h.dim_names,
             )
             continue
-        levels.append((h.hint_id, sympy.Integer(h.split_count)))
+        # sympify (not sympy.Integer) so a symbolic split_count (EXPERIMENTAL,
+        # from tile_size_per_dim) passes through unchanged; sympify(int) is
+        # equivalent to sympy.Integer(int) for the concrete case.
+        levels.append((h.hint_id, sympy.sympify(h.split_count)))
     return levels
 
 

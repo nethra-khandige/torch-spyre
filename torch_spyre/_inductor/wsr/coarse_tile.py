@@ -102,7 +102,12 @@ from ..loop_info import (
     ReductionPlan,
     copy_op_metadata,
 )
-from ..pass_utils import op_out_coords, host_coordinates, indirect_sizes_from_op
+from ..pass_utils import (
+    op_out_coords,
+    host_coordinates,
+    indirect_sizes_from_op,
+    compute_max_size,
+)
 from ..ir import FixedTiledLayout, SpyreConstantFallback, _resize_device_layout
 from .tile import compute_tile_index, compute_tile_stride
 
@@ -400,7 +405,18 @@ def _compute_per_tile_ranges_planned(
                     )
                     ranges[d] = sympy.Integer(int(r) // int(count))
                 else:
-                    ranges[d] = sympy.simplify(sympy.sympify(r) / sympy.sympify(count))
+                    # EXPERIMENTAL: symbolic r (a mark_dynamic dim). See
+                    # _tile_size_from_floor_div's docstring -- plain
+                    # simplify() does NOT resolve r/floor(r/G) back to G
+                    # (verified), so this shortcut is needed instead.
+                    tile_size = _tile_size_from_floor_div(
+                        sympy.sympify(r), sympy.sympify(count)
+                    )
+                    ranges[d] = (
+                        tile_size
+                        if tile_size is not None
+                        else sympy.simplify(sympy.sympify(r) / sympy.sympify(count))
+                    )
     return ranges
 
 
@@ -742,6 +758,33 @@ def _log_propagation_plan(
         )
 
 
+def _tile_size_from_floor_div(r: Expr, count: Expr) -> Expr | None:
+    """Recover the tile size G when count == floor(r / G), G a plain int.
+
+    EXPERIMENTAL: narrow, pattern-based recognition for the
+    tile_size_per_dim hint path. propagate_named_dims.py's
+    _assign_dim_hints_impl always constructs a symbolic split_count as
+    exactly ``range_for_sym // value`` (i.e. sympy.floor(range/G)) --
+    dividing r by that count directly (r / floor(r/G)) does NOT simplify
+    back to G for a symbolic r (verified: `s77 / floor(s77/64)` stays
+    exactly that, unsimplified, not `64`). This recovers G from count's own
+    unevaluated structure instead of trying to re-derive it algebraically
+    after the fact. Returns None (falls through to the general path) for
+    anything that doesn't match this exact shape -- an ordinary concrete
+    split_count, or a count built some other way (e.g. a hand-authored
+    symbolic loop count that isn't a floor-division of this dim's own
+    range) -- so this is intentionally conservative, not a general
+    "undo a floor division" solver.
+    """
+    if not isinstance(count, sympy.floor):
+        return None
+    (arg,) = count.args
+    numer, denom = sympy.fraction(arg)
+    if numer == r and isinstance(denom, (int, sympy.Integer)):
+        return sympy.Integer(denom)
+    return None
+
+
 def _planned_tile_extents_per_level(
     op: ComputedBuffer,
     op_tiled_dims: list[list[int]],
@@ -782,6 +825,12 @@ def _planned_tile_extents_per_level(
                     f"dimensions must be evenly divisible by the loop trip count."
                 )
             return sympy.Integer(int(r) // int(count))
+        # EXPERIMENTAL: symbolic r (a mark_dynamic dim). See
+        # _tile_size_from_floor_div's own docstring for why this shortcut is
+        # needed instead of the plain r/count fallback below.
+        tile_size = _tile_size_from_floor_div(sympy.sympify(r), sympy.sympify(count))
+        if tile_size is not None:
+            return tile_size
         return sympy.sympify(r) / sympy.sympify(count)
 
     final_dim_extents = {
@@ -1202,7 +1251,17 @@ def _divide_ranges(
                 )
             ranges[i] = sympy.Integer(int(r) // int(loop_count))
         else:
-            ranges[i] = sympy.sympify(r) / sympy.sympify(loop_count)
+            # EXPERIMENTAL: symbolic r (a mark_dynamic dim). See
+            # _tile_size_from_floor_div's docstring for why this shortcut is
+            # needed instead of the plain r/loop_count fallback below.
+            tile_size = _tile_size_from_floor_div(
+                sympy.sympify(r), sympy.sympify(loop_count)
+            )
+            ranges[i] = (
+                tile_size
+                if tile_size is not None
+                else sympy.sympify(r) / sympy.sympify(loop_count)
+            )
 
     # Loops is a frozen dataclass; use object.__setattr__ to mutate it.
     object.__setattr__(data, "ranges", ranges)
@@ -1252,10 +1311,13 @@ def _divide_ranges(
     # so symbolic-size FixedLayout tests above are not affected.
     # layout.size is already the new (divided) size; reconstruct the old size
     # by multiplying tiled dims back up: old[i] = new[i] * loop_count.
-    old_host_size = [int(s) for s in layout.size]
+    # EXPERIMENTAL: see _allocate_full_buffer's compute_max_size comment --
+    # same reasoning (post-stickify path, not on the current POC's path but
+    # fixed for consistency).
+    old_host_size = [compute_max_size(s) for s in layout.size]
     for i in tiled_dims:
-        old_host_size[i] = int(new_size[i] * loop_count)
-    new_size_ints = [int(s) for s in new_size]
+        old_host_size[i] = compute_max_size(new_size[i] * loop_count)
+    new_size_ints = [compute_max_size(s) for s in new_size]
     # Recover the authoritative stick host dim from coordinate identity so
     # _resize_device_layout does not have to infer it by size (ambiguous for
     # transposed same-size dims — issue #3116). Tiling-invariant, so safe here.
@@ -1299,7 +1361,17 @@ def _divide_reduction_ranges(
                 )
             reduction_ranges[i] = sympy.Integer(int(r) // int(loop_count))
         else:
-            reduction_ranges[i] = sympy.sympify(r) / sympy.sympify(loop_count)
+            # EXPERIMENTAL: symbolic r (a mark_dynamic reduction dim). See
+            # _tile_size_from_floor_div's docstring for why this shortcut is
+            # needed instead of the plain r/loop_count fallback below.
+            tile_size = _tile_size_from_floor_div(
+                sympy.sympify(r), sympy.sympify(loop_count)
+            )
+            reduction_ranges[i] = (
+                tile_size
+                if tile_size is not None
+                else sympy.sympify(r) / sympy.sympify(loop_count)
+            )
     # Reduction is a frozen dataclass; use object.__setattr__ to mutate it.
     object.__setattr__(data, "reduction_ranges", reduction_ranges)
 
@@ -2049,7 +2121,15 @@ def _allocate_full_buffer(
     dtype = tiled_op.get_dtype()
 
     # Evaluate full_ranges to concrete ints (they should be integer expressions).
-    size = [int(r) for r in full_ranges]
+    # EXPERIMENTAL: a symbolic entry (a mark_dynamic dim) can't be int()'d --
+    # compute_max_size resolves it to its mark_dynamic(max=...) bound instead,
+    # so torch.empty()/the FX node get a valid concrete size to construct
+    # with. This only affects the throwaway construction step: full_buf's
+    # real, logical layout is reassigned below to list(full_ranges) (kept
+    # symbolic, unchanged) regardless of what shape was used to construct it
+    # here, so downstream scheduling/codegen/addressing still see the true
+    # symbolic shape, not the max-resolved one.
+    size = [compute_max_size(r) for r in full_ranges]
 
     first_compute = next(n for n in fx_graph.nodes if n.op != "placeholder")
     with fx_graph.inserting_before(first_compute):
@@ -2080,8 +2160,10 @@ def _allocate_full_buffer(
         # run, so we must assign a FixedTiledLayout now.  Derive the full
         # buffer's device layout by scaling the per-tile device layout up to
         # the full host size using _resize_device_layout.
-        full_size_ints = [int(s) for s in full_ranges]
-        tile_size_ints = [int(s) for s in orig_layout.size]
+        # EXPERIMENTAL: see the compute_max_size comment above -- same
+        # reasoning applies here for the post-stickify device-layout path.
+        full_size_ints = [compute_max_size(s) for s in full_ranges]
+        tile_size_ints = [compute_max_size(s) for s in orig_layout.size]
         # Authoritative stick host dim from coordinate identity (issue #3116);
         # None falls back to size-based inference inside _resize_device_layout.
         stick_hd = _stick_host_dim(tiled_op, orig_layout.device_layout)
@@ -2104,7 +2186,7 @@ def _allocate_full_buffer(
                 full_size_ints,
             )
             ndim_full = len(full_size_ints)
-            full_strides_ints = [int(s) for s in strides]
+            full_strides_ints = [compute_max_size(s) for s in strides]
             device_layout = SpyreTensorLayout(
                 full_size_ints,
                 full_strides_ints,
@@ -2593,7 +2675,9 @@ def _insert_one_read_copy(
     full_layout = full_buf.layout
     copy_layout: FixedLayout | FixedTiledLayout
     if isinstance(full_layout, FixedTiledLayout):
-        full_size_ints = [int(s) for s in full_layout.size]
+        # EXPERIMENTAL: see _allocate_full_buffer's compute_max_size comment
+        # -- same reasoning applies here (mirrors that function's branch).
+        full_size_ints = [compute_max_size(s) for s in full_layout.size]
         # tile_ranges (== list(dep.size)) is dep's *squeezed* size --
         # extract_read_writes drops unit-size dims, so tile_ranges is
         # one shorter per unit dim in full_buf's own raw size and no

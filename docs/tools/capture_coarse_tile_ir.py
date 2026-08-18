@@ -30,6 +30,7 @@ import argparse
 import glob
 import logging
 import os
+import shutil
 import sys
 from unittest.mock import patch as mock_patch
 
@@ -97,6 +98,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--sencores", type=int, default=4, help="SENCORES value. Default: 4."
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help=(
+            "If set, copy each newly-compiled kernel directory (bundle.mlir, "
+            "every sdsc_N.json, and anything else written alongside them) "
+            "into this directory before it can be lost to a later "
+            "'rm -rf /tmp/torchinductor_$USER'. Each kernel gets its own "
+            "subdirectory, named after its cache-dir basename."
+        ),
     )
     args = parser.parse_args()
 
@@ -170,6 +183,12 @@ def main() -> None:
                 print("=" * 80)
                 print("END bundle.mlir")
                 print("=" * 80)
+
+            if args.out_dir:
+                dest = os.path.join(args.out_dir, os.path.basename(d))
+                shutil.copytree(d, dest, dirs_exist_ok=True)
+                sdsc_count = len(glob.glob(os.path.join(dest, "sdsc_*.json")))
+                print(f"Copied {d} -> {dest} ({sdsc_count} sdsc_*.json files)")
 
 
 if __name__ == "__main__":

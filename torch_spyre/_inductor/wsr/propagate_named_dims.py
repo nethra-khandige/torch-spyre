@@ -109,7 +109,7 @@ def _lone_sym(coord: sympy.Expr) -> sympy.Symbol | None:
     return next(iter(syms)) if len(syms) == 1 else None
 
 
-def _untracked_name(context: str, sym, size: int) -> str:
+def _untracked_name(context: str, sym, size: "int | sympy.Expr") -> str:
     name = f"_untracked_{size}"
     _named_dims.setdefault(name, size)
     logger.warning(
@@ -118,8 +118,22 @@ def _untracked_name(context: str, sym, size: int) -> str:
     return name
 
 
-def _consume_names(remaining: list[str], layout_size: int) -> list[str]:
-    """Return the prefix of remaining whose declared sizes multiply to layout_size."""
+def _consume_names(remaining: list[str], layout_size) -> list[str]:
+    """Return the prefix of remaining whose declared sizes multiply to layout_size.
+
+    EXPERIMENTAL: when layout_size is symbolic (a mark_dynamic dim), the
+    ordinary value-matching search below can never succeed -- a name's
+    declared size (from declare_tensor_dim, necessarily a concrete
+    tracing-time value) can never numerically equal a symbolic layout size,
+    so the search would silently fail and drop the name entirely. For the
+    single-name case (no dim fusion), consume that one name directly instead
+    of attempting the match. Multi-name fusion onto one symbolic dim is NOT
+    handled -- out of scope for this POC; falls through to the ordinary
+    search (and its existing "no prefix multiplies" warning) if more than
+    one name remains.
+    """
+    if remaining and bool(getattr(layout_size, "free_symbols", None)):
+        return remaining[:1]
     product = 1
     for i, name in enumerate(remaining):
         if name not in _named_dims:
@@ -157,7 +171,13 @@ def compute_input_named_dims(dep: MemoryDep, op=None, ind_sizes=None) -> dict:
     for i, coord in enumerate(coords):
         if not remaining:
             break
-        dim_size = int(layout.size[i])
+        # EXPERIMENTAL: layout.size[i] may be a symbolic sympy.Expr (a
+        # mark_dynamic dim). Do not int() it -- `== 1` below is already a
+        # safe structural comparison for a sympy.Expr (verified: returns
+        # Python bool, never raises), so no cast is needed for that check.
+        # _consume_names (next) still assumes a concrete, multipliable size;
+        # see its own comment for the current limitation this leaves open.
+        dim_size = layout.size[i]
         if dim_size == 1:
             # Skip: size-1 dims are not annotated.  Broadcast dims (e.g. a [1,N]
             # buffer annotated ["M","N"]) silently become _untracked_ — we cannot
@@ -266,7 +286,13 @@ def _compute_named_dims(op, inputs):
 
     for sym in output_dep.ranges:
         if sym not in loop_var_dims:
-            size = int(output_dep.ranges[sym])
+            # EXPERIMENTAL: size may be a symbolic sympy.Expr (a dynamic dim
+            # this op is not yet tiling by name) -- do NOT int() it. The name
+            # is just for logging/lookup (_named_dims tolerates symbolic
+            # values, verified: only ever multiplied/looked-up/formatted, see
+            # docs/wsr-notes.md), and f"_untracked_{sym_expr}" stringifies a
+            # sympy.Expr fine (e.g. "_untracked_s77").
+            size = output_dep.ranges[sym]
             loop_var_dims[sym] = [_untracked_name(op.get_name(), sym, size)]
     out_coords = op_out_coords(op)
 
@@ -284,8 +310,17 @@ def _compute_named_dims(op, inputs):
         # in downstream ops (it would consume "B" into the wrong pair).
         # Omitting it keeps named_dims aligned with the non-unit layout dims,
         # matching the contract of compute_input_named_dims (size-1 → skip).
-        if int(output_dep.ranges.get(sym, 0)) == 1 and all(
-            n.startswith("_untracked_") for n in names
+        #
+        # EXPERIMENTAL: a symbolic range (e.g. a mark_dynamic-bound dim) can
+        # never be the concrete size-1 case -- ShapeEnv-bound dynamic dims are
+        # never pinned to exactly 1 -- so skip the int() comparison entirely
+        # rather than crash on a range with free symbols.
+        range_val = output_dep.ranges.get(sym, 0)
+        is_symbolic_range = bool(getattr(range_val, "free_symbols", None))
+        if (
+            not is_symbolic_range
+            and int(range_val) == 1
+            and all(n.startswith("_untracked_") for n in names)
         ):
             continue
         named_dims.extend(names)
@@ -582,6 +617,20 @@ def validate_named_dims(graph: GraphLowering) -> None:
                     )
 
 
+def _range_for_sym(op, sym: sympy.Symbol):
+    """Return the range expr for loop var sym from op's own read/write deps.
+
+    EXPERIMENTAL: used by the tile_size_per_dim path below to derive a
+    split_count (possibly symbolic) from a user-given tile size. Returns
+    None if sym is not a loop var of any of this op's deps.
+    """
+    rw = op.get_read_writes()
+    for dep in [*rw.reads, *rw.writes]:
+        if isinstance(dep, MemoryDep) and sym in dep.ranges:
+            return dep.ranges[sym]
+    return None
+
+
 def _assign_dim_hints_impl(operations: list[Operation]) -> None:
     for op in operations:
         if not isinstance(op, ComputedBuffer):
@@ -623,8 +672,12 @@ def _assign_dim_hints_impl(operations: list[Operation]) -> None:
 
         dim_hints = []
         for hint_id, hint_dict in sorted(op_hints.items()):
-            # A hint scope uses exactly one of tiles/slices/num_tiles_per_dim.
-            dims: dict[str, int] = next(
+            # A hint scope uses exactly one of tiles/slices/num_tiles_per_dim
+            # (a tile COUNT) or tile_size_per_dim (a tile SIZE -- EXPERIMENTAL,
+            # for a symbolic/mark_dynamic dim where the caller gives the fixed
+            # tile size G directly and split_count = floor(range/G) is
+            # derived here, rather than being given directly).
+            count_dims: dict[str, int] = next(
                 (
                     v
                     for k in ("tiles", "slices", "num_tiles_per_dim")
@@ -632,6 +685,16 @@ def _assign_dim_hints_impl(operations: list[Operation]) -> None:
                 ),
                 {},
             )
+            size_dims: dict[str, int] = hint_dict.get("tile_size_per_dim") or {}
+            if count_dims and size_dims:
+                raise NotImplementedError(
+                    f"spyre_hint() argument {list(hint_dict.items())} specifies "
+                    f"both a tile-count form (tiles/slices/num_tiles_per_dim) "
+                    f"and tile_size_per_dim; only one is allowed per "
+                    f"spyre_hint() call"
+                )
+            is_size_form = bool(size_dims)
+            dims = size_dims if is_size_form else count_dims
             # TODO: support multiple dimensions per spyre_hint() call.
             # hint_id_to_ranges_pos in plan_coarse_tile_groups would need to
             # become dict[int, list[int]] and _hints_levels would need to
@@ -642,12 +705,34 @@ def _assign_dim_hints_impl(operations: list[Operation]) -> None:
                     f"{len(dims)} dimensions; only one is currently allowed per "
                     f"spyre_hint() call (not yet implemented)"
                 )
-            for name, count in dims.items():
+            for name, value in dims.items():
                 sym = coord_for_name.get(name)
+                split_count = value
+                if is_size_form:
+                    if sym is None:
+                        raise Unsupported(
+                            f"spyre_hint(tile_size_per_dim={{'{name}': {value}}}) "
+                            f"on {op.get_operation_name()}: '{name}' has no "
+                            f"resolved loop var (broadcast/size-1 dim?) -- "
+                            f"tile_size_per_dim requires a real loop var to "
+                            f"divide"
+                        )
+                    range_for_sym = _range_for_sym(op, sym)
+                    if range_for_sym is None:
+                        raise Unsupported(
+                            f"spyre_hint(tile_size_per_dim={{'{name}': {value}}}) "
+                            f"on {op.get_operation_name()}: could not resolve a "
+                            f"range for loop var {sym}"
+                        )
+                    # EXPERIMENTAL: range_for_sym may be symbolic (a
+                    # mark_dynamic dim) -- sympy's // on a symbolic Expr
+                    # already produces floor(range/G) correctly (verified:
+                    # R // 64 == floor(R/64) for a bare sympy.Symbol).
+                    split_count = range_for_sym // value
                 dim_hints.append(
                     DimHint(
                         dim_names=[name],
-                        split_count=count,
+                        split_count=split_count,
                         loop_var=sym,
                         is_reduction=name in reduction_dims,
                         hint_id=hint_id,

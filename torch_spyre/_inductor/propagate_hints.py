@@ -34,7 +34,12 @@ logger = get_inductor_logger("propagate_hints")
 @dataclasses.dataclass
 class DimHint:
     dim_names: list[str]  # e.g. ["A"]
-    split_count: int  # from slices={"A": 4}, e.g. 4
+    # split_count: from slices={"A": 4}, e.g. 4 (concrete). EXPERIMENTAL: for a
+    # symbolic dim tiled via tile_size_per_dim, this is instead a symbolic
+    # sympy.Expr (floor(R/G)) -- see _assign_dim_hints_impl in
+    # propagate_named_dims.py. Real end-to-end support for the symbolic case
+    # does not exist yet; see docs/wsr-notes.md section 9.
+    split_count: "int | sympy.Expr"
     loop_var: "sympy.Symbol | None"  # the loop variable (e.g. c0, c1) for this dim;
     # None when op is broadcast w.r.t. this hint scope
     is_reduction: bool
