@@ -367,12 +367,12 @@ PYBIND11_MODULE(_C, m) {
 
   m.def("spyre_empty_with_layout", &spyre::spyre_empty_with_layout);
   m.def("spyre_empty_reserved", &spyre::spyre_empty_reserved, py::arg("size"),
-        py::arg("stride"), py::arg("dtype"), py::arg("dim"),
-        py::arg("max_size"),
+        py::arg("stride"), py::arg("dtype"), py::arg("reservations"),
         "Allocate a Spyre tensor whose physical layout/storage are sized "
-        "for dim `dim` == `max_size`, while its logical (PyTorch-visible) "
-        "size/stride stay at `size`/`stride`. Backs "
-        "tensor.to(\"spyre\", max=...).");
+        "for dim `d` == `max` for every (d -> max) entry in "
+        "`reservations`, while its logical (PyTorch-visible) size/stride "
+        "stay at `size`/`stride`. Backs "
+        "tensor.to(\"spyre\", dynamic={dim: {min, max}, ...}).");
   m.def("empty_with_layout", &spyre::py_empty_with_layout);
   m.def("as_strided_with_layout", &spyre::as_strided_with_layout);
   m.def("reinterpret_tensor", &spyre::reinterpret_tensor);

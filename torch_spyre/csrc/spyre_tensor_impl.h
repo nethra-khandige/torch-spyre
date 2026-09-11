@@ -21,6 +21,7 @@
 #include <util/sendefs/sendefs.h>
 
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -177,15 +178,18 @@ class SpyreTensorImpl : public at::TensorImpl {
 
   /**
    * When set, this tensor's physical allocation (spyre_layout/storage) is
-   * sized for host_size[*reserved_dim] == *reserved_max rather than the
-   * tensor's current logical size at that dim. Used to support
-   * `tensor.to("spyre", max=...)`: the buffer is allocated once for the
-   * declared ceiling so later in-place resizes to a smaller/larger (but
-   * still <= max) concrete shape never require reallocation or invalidate
-   * the compiled graph's layout guard.
+   * sized for host_size[dim] == max, for every (dim -> max) entry here,
+   * rather than the tensor's current logical size at those dims. Used to
+   * support `tensor.to("spyre", dynamic={dim: {min, max}, ...})`: the
+   * buffer is allocated once for the declared ceilings so later in-place
+   * resizes to a smaller/larger (but still within bounds) concrete shape
+   * never require reallocation or invalidate the compiled graph's layout
+   * guard. A map (not a single dim/max pair) because more than one axis of
+   * the same tensor can be reserved independently -- e.g. batch and
+   * sequence length together. See spyre_empty_reserved() and
+   * spyre_resize_() in spyre_mem.cpp.
    */
-  std::optional<int64_t> reserved_dim;
-  std::optional<int64_t> reserved_max;
+  std::optional<std::map<int64_t, int64_t>> reserved_dims;
 
   SpyreTensorImpl(c10::Storage&& storage, c10::DispatchKeySet key_set,
                   const caffe2::TypeMeta& dtype);

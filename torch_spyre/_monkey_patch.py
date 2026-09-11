@@ -70,16 +70,24 @@ def _patch_tensor_for_spyre():
         else:
             return None
 
-    def spyre_to(self, *args, device_layout=None, max=None, **kwargs):
-        if max is not None:
-            # tensor.to("spyre", max=512): reserve the destination buffer
-            # at `max` along dim 0 instead of the current (warmup) shape,
-            # so a later in-place resize up to `max` (done by the compiled
-            # graph via aten::resize_ / spyre_resize_) never reallocates
-            # and never changes the SpyreTensorLayout the recompile guard
-            # compares against. This is what lets one compiled artifact
-            # serve any runtime batch size in [min, max] without
-            # recompiling for dynamic shape support
+    def spyre_to(self, *args, device_layout=None, max=None, dynamic=None, **kwargs):
+        if max is not None or dynamic is not None:
+            # tensor.to("spyre", max=512) / tensor.to("spyre", dynamic={dim:
+            # {min, max}, ...}): reserve the destination buffer at each
+            # declared ceiling instead of the current (warmup) shape, so a
+            # later in-place resize up to that ceiling (done by the
+            # compiled graph via aten::resize_ / spyre_resize_) never
+            # reallocates and never changes the SpyreTensorLayout the
+            # recompile guard compares against. This is what lets one
+            # compiled artifact serve any runtime shape in range without
+            # recompiling (see docs/source/ runtime max-strided allocation
+            # notes and new_docs/Symbolic_Shapes_HLD.md, Section 6.2/7.1).
+            #
+            # `max=` (legacy) reserves only dim 0 and never calls
+            # mark_dynamic -- unchanged from before. `dynamic=` generalizes
+            # to any set of dims, each with its own (min, max), and folds
+            # in the mark_dynamic call(s) the caller would otherwise have
+            # to make separately, one per dim.
             _device = kwargs.get("device", None)
             if (
                 _device is None
@@ -88,27 +96,56 @@ def _patch_tensor_for_spyre():
             ):
                 _device = args[0]
             TORCH_CHECK_MSG = (
-                'max= is only supported for CPU -> "spyre" transfers, e.g. '
-                'x.to("spyre", max=512)'
+                'max=/dynamic= is only supported for CPU -> "spyre" '
+                'transfers, e.g. x.to("spyre", max=512) or '
+                'x.to("spyre", dynamic={0: dict(min=1, max=512)})'
             )
             if _device is None or torch.device(_device).type != DEVICE_NAME:
                 raise ValueError(TORCH_CHECK_MSG)
             if self.device.type != "cpu":
                 raise ValueError(TORCH_CHECK_MSG)
 
+            if max is not None and dynamic is not None:
+                raise ValueError("pass only one of max= or dynamic=, not both")
+
+            if dynamic is not None:
+                for dim, bounds in dynamic.items():
+                    lo, hi = bounds["min"], bounds["max"]
+                    if not (lo <= self.size(dim) <= hi):
+                        raise ValueError(
+                            f"dynamic[{dim}]: warmup size {self.size(dim)} is "
+                            f"not within the declared range [{lo}, {hi}]"
+                        )
+                reservations = {dim: bounds["max"] for dim, bounds in dynamic.items()}
+            else:
+                reservations = {0: max}
+
             # Unlike the plain `.to("spyre")` path below, which dispatches
             # through aten::to/aten::empty_strided, this branch calls
-            # spyre_empty_reserved directly via pybind11. Any direct _C call must
-            # ensure the runtime is up itself first
+            # spyre_empty_reserved directly via pybind11. Confirmed by
+            # direct testing: going through the ATen dispatcher (e.g.
+            # torch.empty_strided(device="spyre")) self-inits the runtime
+            # on a cold process, but calling a torch_spyre._C allocator
+            # function directly does not — the same gap reproduces on the
+            # already-shipped spyre_empty_with_layout, used by the
+            # .to(device_layout=...) path below. So any direct _C call must
+            # ensure the runtime is up itself first, same as
+            # manual_seed/CCL-backend/profiler init elsewhere in this file.
             if not torch.spyre.is_initialized():
                 torch.spyre._impl._lazy_init()
 
             from torch_spyre._C import copy_tensor, spyre_empty_reserved
 
-            dst = spyre_empty_reserved(self.size(), self.stride(), self.dtype, 0, max)
+            dst = spyre_empty_reserved(
+                self.size(), self.stride(), self.dtype, reservations
+            )
             copy_tensor(self, dst, non_blocking=False)
+            if dynamic is not None:
+                for dim, bounds in dynamic.items():
+                    torch._dynamo.mark_dynamic(
+                        dst, dim, min=bounds["min"], max=bounds["max"]
+                    )
             return dst
-
         if device_layout is None:
             # Support D2H and H2D dtype casting via DCI (DataConversionInfo) in spyre_mem.cpp.
             # For D2D data casting, split it into a D2H copy and a H2D dtype conversion.

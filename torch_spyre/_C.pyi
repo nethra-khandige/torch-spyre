@@ -453,14 +453,13 @@ def spyre_empty_reserved(
     size: tuple[int, ...],
     stride: tuple[int, ...],
     dtype: torch.dtype,
-    dim: int,
-    max_size: int,
+    reservations: dict[int, int],
 ) -> torch.Tensor:
     """
     Allocate a Spyre tensor whose physical layout/storage are sized for
-    dim `dim` == `max_size`, while its logical (PyTorch-visible)
-    size/stride stay at `size`/`stride`. Backs
-    tensor.to("spyre", max=...).
+    dim `d` == `max` for every (d -> max) entry in `reservations`, while
+    its logical (PyTorch-visible) size/stride stay at `size`/`stride`.
+    Backs tensor.to("spyre", dynamic={dim: {min, max}, ...}).
     """
 
 def spyre_empty_with_layout(

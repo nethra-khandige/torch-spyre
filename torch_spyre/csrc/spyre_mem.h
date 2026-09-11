@@ -19,6 +19,8 @@
 #include <ATen/ATen.h>
 #include <c10/util/intrusive_ptr.h>
 
+#include <map>
+
 #include "module.h"
 
 namespace spyre {
@@ -54,14 +56,17 @@ at::Tensor spyre_empty_with_layout(c10::IntArrayRef size,
 /**
  * Allocate a Spyre tensor whose logical size/stride are `size`/`stride`
  * (i.e. what PyTorch sees) but whose physical layout and storage are sized
- * as if dimension `dim` were `max_size`. This lets a single allocation
- * absorb any later in-place resize of `dim` up to `max_size` (see
+ * as if dimension `dim` were `max` for every (dim -> max) entry in
+ * `reservations`. This lets a single allocation absorb any later in-place
+ * resize of those dims, independently, up to their declared maxes (see
  * spyre_resize_) without reallocating or changing the SpyreTensorLayout
- * that recompile guards compare against. Backs `tensor.to("spyre", max=)`.
+ * that recompile guards compare against. More than one dim can be
+ * reserved at once -- e.g. batch and sequence length together. Backs
+ * `tensor.to("spyre", dynamic={dim: {min, max}, ...})`.
  */
 at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
-                                c10::ScalarType dtype, int64_t dim,
-                                int64_t max_size);
+                                c10::ScalarType dtype,
+                                std::map<int64_t, int64_t> reservations);
 
 at::Tensor empty_with_layout(
     c10::IntArrayRef size, SpyreTensorLayout device_layout,
