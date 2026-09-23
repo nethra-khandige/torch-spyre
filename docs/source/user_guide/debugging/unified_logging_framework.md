@@ -34,7 +34,6 @@
     - [Using the Macros](#using-the-macros)
     - [The Logger Class](#the-logger-class)
     - [Performance: Level-Gated Logging](#performance-level-gated-logging)
-    - [Legacy DEBUGINFO](#legacy-debuginfo)
     - [Log Format (C++)](#log-format-c)
     - [File Output (C++)](#file-output-c)
   - [7. Python–C++ Synchronization](#7-pythonc-synchronization)
@@ -296,6 +295,7 @@ These components are defined in `DEFAULT_LOG_LEVELS` in
 | `spyre.inductor` | All Inductor compiler passes and codegen | `torch_spyre/_inductor/` |
 | `spyre.inductor.lowering` | Op lowering (ATen → Spyre IR) | `_inductor/lowering.py` |
 | `spyre.inductor.codegen` | Code generation (parent) | `_inductor/codegen/bundle.py` |
+| `spyre.inductor.sdsc` | SuperDSC bundle generation | `_inductor/codegen/bundle.py` |
 | `spyre.inductor.stickify` | Tensor stickification passes | `_inductor/insert_restickify.py` |
 | `spyre.inductor.passes` | General compiler passes | `_inductor/passes.py` |
 | `spyre.runtime` | C++ runtime (allocator, streams, distributed) | `torch_spyre/csrc/` |
@@ -447,7 +447,6 @@ three layers:
 | --- | --- |
 | `logging_config.h` / `.cpp` | `LoggingConfig` singleton, `Logger` class, convenience macros |
 | `logging_bindings.h` / `.cpp` | pybind11 bindings exposing C++ logging to Python |
-| `logging_legacy.h` | `DEBUGINFO(...)` compatibility shim |
 | `logging.h` / `.cpp` | Umbrella header re-exporting the public interface |
 
 All C++ logging state lives in the `torch_spyre::logging` namespace.
@@ -463,11 +462,10 @@ For most C++ code in `torch_spyre/csrc/`, include the umbrella header:
 This gives you access to:
 
 - All `SPYRE_LOG` / `SPYRE_RUNTIME_*` macros
-- The `DEBUGINFO(...)` legacy macro
 - The `Logger`, `LoggingConfig`, and `LogLevel` types
 
-If you only need the new logging system (no legacy `DEBUGINFO`), you can
-include `logging_config.h` directly.
+`logging.h` re-exports the public interface from `logging_config.h`, so
+for most code either header works.
 
 ### Available Macros
 
@@ -480,12 +478,15 @@ include `logging_config.h` directly.
 | `SPYRE_RUNTIME_CRITICAL()` | `spyre.runtime` | CRITICAL |
 | `SPYRE_LOG(component, LEVEL)` | any | any |
 | `SPYRE_LOG_ENABLED(component, level)` | any | any (returns bool) |
-| `DEBUGINFO(...)` | `spyre.runtime` | DEBUG (legacy) |
 
 The `SPYRE_LOG` macro is **zero-cost when disabled**: it checks
 `SPYRE_LOG_ENABLED` first (a thread-local cache hit) and short-circuits
 the entire `Logger` construction and stream operations when the level is
 not enabled.
+
+Every `SPYRE_LOG` and `SPYRE_RUNTIME_*` record is automatically prefixed
+with the calling function name (`__func__`), so the C++ log format shows
+`function_name: message` without any manual annotation.
 
 ### Adding Logging to New C++ Code
 
@@ -585,23 +586,6 @@ if (SPYRE_LOG_ENABLED("spyre.runtime", torch_spyre::logging::LogLevel::DEBUG)) {
     SPYRE_RUNTIME_DEBUG() << dump;
 }
 ```
-
-### Legacy DEBUGINFO
-
-```cpp
-#include "logging.h"
-
-DEBUGINFO("Allocating ", nbytes, " bytes on Spyre", device);
-// Equivalent to: SPYRE_RUNTIME_DEBUG() << __func__ << ": Allocating " << ...
-```
-
-`DEBUGINFO` maps to component `spyre.runtime` at DEBUG level. It
-automatically prepends the calling function name (`__func__`).
-
-The `DEBUGINFO` macro is defined in `logging_legacy.h` and delegates to
-the new `Logger` class internally — it is not a separate logging system.
-It exists solely for backward compatibility with existing C++ code. New
-code should use `SPYRE_LOG` or `SPYRE_RUNTIME_*` macros instead.
 
 ### Log Format (C++)
 
