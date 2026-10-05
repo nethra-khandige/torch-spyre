@@ -137,7 +137,147 @@ def _patch_tensor_for_spyre():
         else:
             return None
 
-    def spyre_to(self, *args, device_layout=None, **kwargs):
+    # def spyre_to(self, *args, device_layout=None, max=None, **kwargs):
+    #     if max is not None:
+    #         # tensor.to("spyre", max=512): reserve the destination buffer
+    #         # at `max` along dim 0 instead of the current (warmup) shape,
+    #         # so a later in-place resize up to `max` (done by the compiled
+    #         # graph via aten::resize_ / spyre_resize_) never reallocates
+    #         # and never changes the SpyreTensorLayout the recompile guard
+    #         # compares against. This is what lets one compiled artifact
+    #         # serve any runtime batch size in [min, max] without
+    #         # recompiling.
+    #         _device = kwargs.get("device", None)
+    #         if (
+    #             _device is None
+    #             and len(args) > 0
+    #             and isinstance(args[0], (str, torch.device))
+    #         ):
+    #             _device = args[0]
+    #         TORCH_CHECK_MSG = (
+    #             'max= is only supported for CPU -> "spyre" transfers, e.g. '
+    #             'x.to("spyre", max=512)'
+    #         )
+    #         if _device is None or torch.device(_device).type != DEVICE_NAME:
+    #             raise ValueError(TORCH_CHECK_MSG)
+    #         if self.device.type != "cpu":
+    #             raise ValueError(TORCH_CHECK_MSG)
+
+    #         # This branch calls spyre_empty_reserved directly via pybind11,
+    #         # bypassing the ATen dispatcher path that ordinarily self-inits
+    #         # the runtime (via the H2D stream pool inside spyre_copy_from ->
+    #         # getCurrentStream). On a fresh process this can be the very
+    #         # first device op, so the runtime must be brought up explicitly
+    #         # here first -- same idiom as manual_seed/CCL-backend/profiler
+    #         # init elsewhere in this package.
+    #         if not torch.spyre.is_initialized():
+    #             torch.spyre._impl._lazy_init()
+
+    #         from torch_spyre._C import copy_tensor, spyre_empty_reserved
+
+    #         dst = spyre_empty_reserved(self.size(), self.stride(), self.dtype, 0, max)
+    #         copy_tensor(self, dst, non_blocking=False)
+    #         return dst
+    def spyre_to(self, *args, device_layout=None, dynamic=None, **kwargs):
+        if dynamic is not None:
+            # tensor.to("spyre", dynamic={0: {"min": 32, "max": 576,
+            # "granularity": 16}}): reserve the destination buffer at `max`
+            # along `dim` instead of the current (warmup) shape, so a later
+            # in-place resize up to `max` (done by the compiled graph via
+            # aten::resize_ / spyre_resize_) never reallocates and never
+            # changes the SpyreTensorLayout the recompile guard compares
+            # against, then internally call mark_dynamic(dim, min=, max=)
+            # so the ShapeEnv records the bound before torch.compile traces
+            # this tensor. This is what lets one compiled artifact serve
+            # any runtime size in [min, max] at `dim` without recompiling.
+            # Scope for now: exactly one dim (dim 0 comes first) -- multi-dim
+            # reservation is a later layer.
+            # `granularity` is optional; omitting it means "no step
+            # restriction" (equivalent to granularity=1). When given, it is
+            # stored on the destination tensor (SpyreTensorImpl.reserved_dims)
+            # so the runtime resize_ guard can check every later resize_
+            # against it -- see spyre_tensor_impl.h's ReservedDimInfo.
+            _device = kwargs.get("device", None)
+            if (
+                _device is None
+                and len(args) > 0
+                and isinstance(args[0], (str, torch.device))
+            ):
+                _device = args[0]
+            TORCH_CHECK_MSG = (
+                'dynamic= is only supported for CPU -> "spyre" transfers, e.g. '
+                'x.to("spyre", dynamic={0: {"min": 32, "max": 576, '
+                '"granularity": 16}})'
+            )
+            if _device is None or torch.device(_device).type != DEVICE_NAME:
+                raise ValueError(TORCH_CHECK_MSG)
+            if self.device.type != "cpu":
+                raise ValueError(TORCH_CHECK_MSG)
+            if not isinstance(dynamic, dict) or len(dynamic) != 1:
+                raise ValueError(
+                    "dynamic= currently supports exactly one dim, e.g. "
+                    'x.to("spyre", dynamic={0: {"min": 32, "max": 576, '
+                    '"granularity": 16}})'
+                )
+
+            ((dim, spec),) = dynamic.items()
+            if "max" not in spec:
+                raise ValueError(f"dynamic={{{dim}: ...}} requires a 'max' entry")
+            if "min" not in spec:
+                raise ValueError(f"dynamic={{{dim}: ...}} requires a 'min' entry")
+            dim_max = spec["max"]
+            dim_min = spec["min"]
+            granularity = spec.get("granularity")
+
+            size = self.size()
+            if not (0 <= dim < len(size)):
+                raise ValueError(
+                    f"dynamic dim {dim} is out of range for tensor of shape "
+                    f"{tuple(size)}"
+                )
+            if dim_min > dim_max:
+                raise ValueError(
+                    f"dynamic={{{dim}: ...}}: min={dim_min} exceeds max={dim_max}"
+                )
+            if not (dim_min <= size[dim] <= dim_max):
+                raise ValueError(
+                    f"dynamic={{{dim}: ...}}: current size {size[dim]} at dim "
+                    f"{dim} is not within [min={dim_min}, max={dim_max}]"
+                )
+            if granularity is not None and size[dim] % granularity != 0:
+                raise ValueError(
+                    f"dynamic={{{dim}: ...}}: current size {size[dim]} at dim "
+                    f"{dim} is not a multiple of granularity={granularity}"
+                )
+
+            # This path calls spyre_empty_reserved directly via pybind11,
+            # bypassing the ATen dispatcher path that ordinarily self-inits
+            # the runtime (via the H2D stream pool inside spyre_copy_from ->
+            # getCurrentStream). On a fresh process this can be the very
+            # first device op, so the runtime must be brought up explicitly
+            # here first -- same idiom as manual_seed/CCL-backend/profiler
+            # init elsewhere in this package.
+            if not torch.spyre.is_initialized():
+                torch.spyre._impl._lazy_init()
+
+            from torch_spyre._C import copy_tensor, spyre_empty_reserved
+
+            dst = spyre_empty_reserved(
+                self.size(),
+                self.stride(),
+                self.dtype,
+                dim,
+                dim_min,
+                dim_max,
+                granularity if granularity is not None else 1,
+            )
+            copy_tensor(self, dst, non_blocking=False)
+
+            # Register the bound with Dynamo's ShapeEnv *before* torch.compile
+            # ever traces this tensor -- mark_dynamic must be called eager,
+            # pre-compile.
+            torch._dynamo.mark_dynamic(dst, dim, min=dim_min, max=dim_max)
+            return dst
         if device_layout is None:
             # During Dynamo tracing this wrapper is an allow_in_graph leaf: keep
             # the operation device-local so Inductor sees and lowers the dtype
