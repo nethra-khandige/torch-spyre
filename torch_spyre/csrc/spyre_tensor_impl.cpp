@@ -269,6 +269,7 @@ SpyreTensorImpl::shallow_copy_and_detach_core(
                                                    data_type_, spyre_layout);
   impl->dma_sizes = this->dma_sizes;
   impl->dma_strides = this->dma_strides;
+  impl->reserved_dims = this->reserved_dims;
   copy_tensor_metadata(
       /*src_impl=*/this,
       /*dest_impl=*/impl.get(),
@@ -301,6 +302,7 @@ void SpyreTensorImpl::shallow_copy_from(
   this->dma_sizes = spyre_impl->dma_sizes;
   this->dma_strides = spyre_impl->dma_strides;
   this->spyre_layout = spyre_impl->spyre_layout;
+  this->reserved_dims = spyre_impl->reserved_dims;
 }
 
 uint64_t get_device_size_in_bytes(const SpyreTensorLayout& stl) {
