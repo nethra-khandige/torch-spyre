@@ -278,6 +278,20 @@ void set_spyre_tensor_layout(const at::Tensor& tensor,
 std::vector<int64_t> get_spyre_tensor_sizes(const at::Tensor& tensor);
 std::vector<int64_t> get_spyre_tensor_strides(const at::Tensor& tensor);
 
+/**
+ * Read back a tensor's reservation contract (see reserved_dims above), as
+ * plain Python-friendly types: {dim: {"min": ..., "max": ...,
+ * "granularity": ...}}, or nullopt if the tensor has no reservation.
+ *
+ * Unlike the accessors above, this never throws: it returns nullopt for a
+ * non-Spyre tensor instead of requiring the caller to check first. It is
+ * called from the compiler's lowering pass over every graph input of every
+ * compile, Spyre or not, so a throw here would turn an ordinary CPU input
+ * into a compile crash.
+ */
+std::optional<std::map<int64_t, std::map<std::string, int64_t>>>
+get_reserved_dims(const at::Tensor& tensor);
+
 }  // namespace spyre
 
 // Must be in namespace std so std::unordered_map/set find it automatically.
