@@ -36,6 +36,7 @@ __all__: list[str] = [
     "get_device_dtype",
     "get_downcast_warning",
     "get_elem_in_stick",
+    "get_reserved_dims",
     "get_spyre_tensor_layout",
     "get_device_size_in_bytes",
     "kernel_provenance_registry_stats",

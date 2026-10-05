@@ -1008,6 +1008,7 @@ at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
   SPYRE_RUNTIME_DEBUG() << "SpyreTensorLayout (reserved dim=" << dim
                         << " min=" << min_size << " max=" << max_size
                         << " granularity=" << granularity
+                        << " reserved_bytes=" << size_bytes
                         << "): " << device_layout.toString();
   return tensor;
 }
