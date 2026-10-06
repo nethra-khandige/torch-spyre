@@ -350,6 +350,15 @@ def get_downcast_warning() -> bool:
     """
 
 def get_elem_in_stick(arg0: torch.dtype) -> int: ...
+def get_reserved_dims(
+    tensor: torch.Tensor,
+) -> dict[int, dict[str, int]] | None:
+    """
+    Return {dim: {'min', 'max', 'granularity'}} for a tensor.to(
+    "spyre", dynamic=...) reservation, or None. Never raises, even
+    for a non-Spyre tensor.
+    """
+
 @typing.overload
 def get_device_size_in_bytes(layout: SpyreTensorLayout) -> int: ...
 @typing.overload
@@ -473,6 +482,7 @@ def spyre_empty_reserved(
     stored on the tensor for the runtime resize_ guard to check. Backs
     tensor.to("spyre", dynamic={dim: {min, max, granularity}}).
     """
+
 def spyre_empty_with_layout(
     size: tuple[int, ...],
     stride: tuple[int, ...],

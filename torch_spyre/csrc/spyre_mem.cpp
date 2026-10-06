@@ -962,6 +962,11 @@ at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
   TORCH_CHECK(granularity >= 1, "granularity must be >= 1, got ", granularity);
   TORCH_CHECK(min_size <= max_size, "min=", min_size,
               " must be <= max=", max_size, " at dim ", dim);
+  TORCH_CHECK(max_size % granularity == 0, "max=", max_size,
+              " is not a multiple of granularity=", granularity, " at dim ",
+              dim,
+              "; an unreachable ceiling would make every resize_ to max "
+              "fail the per-resize granularity check");
   TORCH_CHECK(min_size <= size[dim] && size[dim] <= max_size, "current size ",
               size[dim], " at dim ", dim, " is not within [min=", min_size,
               ", max=", max_size, "]");
@@ -969,8 +974,8 @@ at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
               " at dim ", dim,
               " is not a multiple of granularity=", granularity);
   TORCH_CHECK(dim != static_cast<int64_t>(size.size()) - 1,
-              "tensor.to(\"spyre\", max=...) does not yet support "
-              "reserving the innermost (stick) dimension ",
+              "tensor.to(\"spyre\", dynamic={dim: {...}}) does not yet "
+              "support reserving the innermost (stick) dimension ",
               dim,
               ": padding a stick dimension changes stride_map for every "
               "outer dimension, unlike a batch/outer dimension, so the "
@@ -1277,7 +1282,7 @@ const at::Tensor& spyre_resize_(
 
   auto* self_impl = static_cast<SpyreTensorImpl*>(self.unsafeGetTensorImpl());
 
-  // If this tensor was allocated via tensor.to("spyre", max=...), its
+  // If this tensor was allocated via tensor.to("spyre", dynamic=...), its
   // storage/layout are already sized for each reserved dim's max.
   // Keep the layout pinned at that ceiling instead of recomputing it from
   // the concrete new size, so that:
@@ -1288,10 +1293,10 @@ const at::Tensor& spyre_resize_(
   //      identical across every concrete shape the reservation covers, so
   //      resizing never forces a spurious recompile.
   std::vector<int64_t> layout_size = size_int.vec();
-  if (self_impl->reserved_dims.has_value()) {
+  if (!self_impl->reserved_dims.empty()) {
     // Scope today: at most one entry, so this loop runs once; the guard is
     // already written per-dim so a later second entry needs no changes here.
-    for (const auto& [rdim, info] : *self_impl->reserved_dims) {
+    for (const auto& [rdim, info] : self_impl->reserved_dims) {
       // The reservation's contract is "only reserved dims move": the buffer
       // was sized from the shape at allocation time with just `rdim` padded
       // to info.max, so every other dim must stay exactly what it currently
@@ -1337,12 +1342,21 @@ const at::Tensor& spyre_resize_(
   // Only valid when new last dim ≤ old last dim; otherwise D2H reads into
   // stick padding.
   const int64_t new_numel = c10::multiply_integers(size_int);
+  // Trivially true on the reserved path: the innermost dim can never be
+  // the reserved one (checked above in spyre_empty_reserved), and every
+  // non-reserved dim is pinned by the per-dim checks above, so this only
+  // actually discriminates on the non-reserved (plain resize_) path.
   const bool last_dim_ok = size_int.empty() || self.sizes().empty() ||
                            size_int.back() <= self.sizes().back();
-  const bool grow_within_reservation =
-      self_impl->reserved_dims.has_value() && new_numel > self.numel();
+  // Name is "reserved and growing", not "growing within the reservation":
+  // the actual bound check already happened in the per-dim TORCH_CHECKs
+  // above, and new_size_bytes <= self.storage().nbytes() below is what
+  // keeps this safe. This flag only decides whether growth is eligible
+  // for the no-realloc branch at all.
+  const bool reserved_and_growing =
+      !self_impl->reserved_dims.empty() && new_numel > self.numel();
   if (new_size_bytes <= self.storage().nbytes() &&
-      (new_numel <= self.numel() || grow_within_reservation) && last_dim_ok) {
+      (new_numel <= self.numel() || reserved_and_growing) && last_dim_ok) {
     self_impl->set_sizes_contiguous(size_int);
     self_impl->spyre_layout = new_layout;
     self_impl->dma_sizes = size_int.vec();
@@ -1351,7 +1365,11 @@ const at::Tensor& spyre_resize_(
                           << " layout=" << self_impl->spyre_layout.toString();
     return self;
   }
-  TORCH_CHECK(!self_impl->reserved_dims.has_value(),
+  // Expected unreachable: every in-bounds resize_ of a reserved tensor is
+  // caught by the branch above, since new_size_bytes is always <= the
+  // storage already sized for max. Kept as fail-closed defence in depth
+  // rather than removed, in case that invariant is ever violated upstream.
+  TORCH_CHECK(self_impl->reserved_dims.empty(),
               "resize_ on a max-reserved Spyre tensor would require "
               "reallocation for target shape=",
               size_int, ", which breaks the reservation invariant");
@@ -1374,67 +1392,6 @@ const at::Tensor& spyre_resize_(
                         << " layout=" << self_impl->spyre_layout.toString();
   return self;
 }
-
-// const at::Tensor& spyre_resize_(
-//     const at::Tensor& self, c10::SymIntArrayRef size,
-//     std::optional<c10::MemoryFormat> memory_format_opt) {
-//   auto size_int = c10::asIntArrayRefUnchecked(size);
-//   // Case 1: No-op.
-//   if (self.sizes() == size_int && self.is_contiguous()) {
-//     return self;
-//   }
-//   TORCH_CHECK(memory_format_opt != c10::MemoryFormat::Preserve,
-//               "aten::resize_ does not support MemoryFormat::Preserve");
-//   TORCH_CHECK(!memory_format_opt.has_value() ||
-//                   *memory_format_opt == c10::MemoryFormat::Contiguous,
-//               "aten::resize_ on Spyre only supports contiguous memory format");
-//   const auto dtype = c10::typeMetaToScalarType(self.dtype());
-//   TORCH_CHECK(spyre::is_supported_dtype(dtype),
-//               "Spyre backend does not support dtype ", dtype);
-
-//   auto* self_impl = static_cast<SpyreTensorImpl*>(self.unsafeGetTensorImpl());
-//   // Use STL device bytes (stick-padded) to determine if existing allocation
-//   // suffices.
-//   auto new_layout = SpyreTensorLayout(size_int.vec(), dtype);
-//   const size_t new_device_bytes = get_device_size_in_bytes(new_layout);
-//   const size_t new_cpu_bytes =
-//       at::detail::computeStorageNbytesContiguous(size_int, self.itemsize());
-//   const size_t new_size_bytes = std::max(new_device_bytes, new_cpu_bytes);
-//   // Case 2: Same-numel or shrink — reinterpret storage in-place, no data moved.
-//   // Only valid when new last dim ≤ old last dim; otherwise D2H reads into stick
-//   // padding.
-//   const int64_t new_numel = c10::multiply_integers(size_int);
-//   const bool last_dim_ok = size_int.empty() || self.sizes().empty() ||
-//                            size_int.back() <= self.sizes().back();
-//   if (new_size_bytes <= self.storage().nbytes() && new_numel <= self.numel() &&
-//       last_dim_ok) {
-//     self_impl->set_sizes_contiguous(size_int);
-//     self_impl->spyre_layout = new_layout;
-//     self_impl->dma_sizes = size_int.vec();
-//     self_impl->dma_strides = self_impl->strides().vec();
-//     SPYRE_RUNTIME_DEBUG() << "to shape=" << size_int
-//                           << " layout=" << self_impl->spyre_layout.toString();
-//     return self;
-//   }
-//   // Case 3: Reallocate — D2H → CPU resize_ → H2D. Handles expand and any
-//   // reshape where the new last dim > old last dim (stick-layout incompatible).
-//   // TODO(kunuruabhishek): avoid round-trip once restickify supports
-//   // cross-layout D2D copies.
-//   at::Tensor cpu_buf = self.cpu();
-//   cpu_buf.resize_(size_int);
-//   auto new_storage_impl = c10::make_intrusive<SpyreStorageImpl>(
-//       c10::StorageImpl::use_byte_size_t(), new_size_bytes,
-//       &SpyreAllocator::instance(), /*resizeable=*/true);
-//   self_impl->set_storage_keep_dtype(c10::Storage(new_storage_impl));
-//   self_impl->set_sizes_contiguous(size_int);
-//   self_impl->spyre_layout = new_layout;
-//   self_impl->dma_sizes = size_int.vec();
-//   self_impl->dma_strides = self_impl->strides().vec();
-//   at::_copy_from(cpu_buf, self, /*non_blocking=*/false);
-//   SPYRE_RUNTIME_DEBUG() << "expand to shape=" << size_int
-//                         << " layout=" << self_impl->spyre_layout.toString();
-//   return self;
-// }
 
 at::Tensor spyre_fill_tensor(const at::Tensor& self, double value) {
   TORCH_CHECK(self.is_privateuseone(),

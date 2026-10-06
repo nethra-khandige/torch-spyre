@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for torch_spyre._C.get_reserved_dims (N5).
+"""Tests for torch_spyre._C.get_reserved_dims.
 
-This is the one accessor the compiler PR reads to recover a tensor's
-dynamic-shape declaration once tracing has replaced the real tensor with a
-placeholder. Its contract (PR4326_runtime_spec_v2_for_nethra.md, section
-5.2) is narrower than a typical accessor: it must never raise, including
-for tensors that were never reserved at all.
+A read-only accessor onto a tensor's dynamic-shape reservation (set by
+tensor.to("spyre", dynamic={dim: {min, max, granularity}})). Unlike most
+accessors in this codebase, it must never raise: it is meant to be called
+on arbitrary graph inputs, including tensors that were never reserved and
+tensors that aren't even on this device.
 """
 
 import torch
@@ -55,4 +55,3 @@ class TestGetReservedDims(TestCase):
 
 if __name__ == "__main__":
     run_tests()
-

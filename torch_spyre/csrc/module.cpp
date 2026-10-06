@@ -30,6 +30,7 @@
 #include <filesystem>  // NOLINT(build/c++17)
 #include <flex/flex.hpp>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -421,10 +422,31 @@ PYBIND11_MODULE(_C, m) {
   m.def("set_spyre_tensor_layout", &spyre::set_spyre_tensor_layout);
   m.def("get_spyre_tensor_sizes", &spyre::get_spyre_tensor_sizes);
   m.def("get_spyre_tensor_strides", &spyre::get_spyre_tensor_strides);
-  m.def("get_reserved_dims", &spyre::get_reserved_dims, py::arg("tensor"),
-        "Return {dim: {'min', 'max', 'granularity'}} for a tensor.to("
-        "\"spyre\", dynamic=...) reservation, or None. Never raises, even "
-        "for a non-Spyre tensor.");
+  m.def(
+      "get_reserved_dims",
+      [](const at::Tensor& tensor)
+          -> std::optional<std::map<int64_t, std::map<std::string, int64_t>>> {
+        // The dict-of-strings conversion lives here, at the Python
+        // boundary, rather than in spyre::get_reserved_dims itself -- a
+        // C++ caller of that function gets the typed ReservedDimInfo
+        // struct with compile-time field checking, not string lookups
+        // into a dict it has to spell correctly.
+        auto reserved = spyre::get_reserved_dims(tensor);
+        if (!reserved.has_value()) {
+          return std::nullopt;
+        }
+        std::map<int64_t, std::map<std::string, int64_t>> result;
+        for (const auto& [dim, info] : *reserved) {
+          result[dim] = {{"min", info.min},
+                         {"max", info.max},
+                         {"granularity", info.granularity}};
+        }
+        return result;
+      },
+      py::arg("tensor"),
+      "Return {dim: {'min', 'max', 'granularity'}} for a tensor.to("
+      "\"spyre\", dynamic=...) reservation, or None. Never raises, even "
+      "for a non-Spyre tensor.");
   m.def("get_downcast_warning", &spyre::get_downcast_warn_enabled,
         "Return whether downcast warnings are enabled.");
   m.def("set_downcast_warning", &spyre::set_downcast_warn_enabled,

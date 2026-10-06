@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the dynamic= declaration validation (N4).
+"""Tests for validating a dynamic= declaration at .to() time.
 
-Five rules from PR4326_runtime_spec_v2_for_nethra.md, all enforced at
-.to() time before anything is allocated: min/max/granularity are positive
-ints, min <= max, max % granularity == 0 (the declared ceiling, distinct
-from the pre-existing check on today's real size), min >= the serving-
-plugin floor, and max / granularity <= max_buckets. Also covers the
-negative-dim canonicalization folded into the same validation pass.
+All of these are checked before anything is allocated: min/max/granularity
+must be positive ints, min <= max, max must be a multiple of granularity
+(the declared ceiling -- distinct from the separate check on today's real
+size), min must clear a configured floor, and max / granularity must not
+exceed the configured bucket cap. Also covers negative-dim canonicalization
+and unknown-key rejection in the same validation pass.
 """
 
 import torch
@@ -80,8 +80,8 @@ class TestDynamicDeclarationValidation(TestCase):
         )
 
     def test_real_size_outside_declared_range_rejected(self) -> None:
-        # Pre-existing check, not one of the five declaration rules: the
-        # *current* tensor's size must itself be admissible.
+        # Not one of the declaration-only rules above: the *current*
+        # tensor's size must itself be admissible under the declared range.
         self._assert_rejected(
             {"min": 64, "max": 512, "granularity": 64},  # 560 > 512
             "is not within",
@@ -106,6 +106,18 @@ class TestDynamicDeclarationValidation(TestCase):
             get_reserved_dims(x_dev),
             {0: {"min": 70, "max": 630, "granularity": 70}},
         )
+
+    def test_unknown_key_rejected(self) -> None:
+        # A typo'd key ("granulrity") must not silently fall back to
+        # granularity's default of 1 -- that would make the reservation
+        # claim no step restriction while the caller believes it declared
+        # one, and every later resize_ to an off-step size would be
+        # silently accepted instead of refused.
+        self._assert_rejected({"min": 70, "max": 630, "granulrity": 70}, "unknown key")
+
+    def test_non_int_dim_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an int"):
+            self.x.to(DEVICE, dynamic={0.5: {"min": 70, "max": 630}})
 
 
 if __name__ == "__main__":

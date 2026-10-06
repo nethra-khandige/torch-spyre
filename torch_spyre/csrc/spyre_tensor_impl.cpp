@@ -371,22 +371,16 @@ std::vector<int64_t> get_spyre_tensor_strides(const at::Tensor& tensor) {
   TORCH_CHECK(false, "Error: Device tensor does not have SpyreTensorImpl");
 }
 
-std::optional<std::map<int64_t, std::map<std::string, int64_t>>>
-get_reserved_dims(const at::Tensor& tensor) {
+std::optional<std::map<int64_t, ReservedDimInfo>> get_reserved_dims(
+    const at::Tensor& tensor) {
   if (!tensor.is_privateuseone()) {
     return std::nullopt;
   }
   auto* impl = dynamic_cast<SpyreTensorImpl*>(tensor.unsafeGetTensorImpl());
-  if (impl == nullptr || !impl->reserved_dims.has_value()) {
+  if (impl == nullptr || impl->reserved_dims.empty()) {
     return std::nullopt;
   }
-  std::map<int64_t, std::map<std::string, int64_t>> result;
-  for (const auto& [dim, info] : *impl->reserved_dims) {
-    result[dim] = {{"min", info.min},
-                   {"max", info.max},
-                   {"granularity", info.granularity}};
-  }
-  return result;
+  return impl->reserved_dims;
 }
 
 };  // namespace spyre
