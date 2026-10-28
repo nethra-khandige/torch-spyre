@@ -19,7 +19,11 @@
 #include <ATen/ATen.h>
 #include <c10/util/intrusive_ptr.h>
 
+#include <map>
+#include <optional>
+
 #include "module.h"
+#include "spyre_tensor_impl.h"
 
 namespace spyre {
 
@@ -47,7 +51,9 @@ class SpyreTensorLayout;
 at::Tensor spyre_empty_with_layout(
     c10::IntArrayRef size, c10::IntArrayRef stride, c10::ScalarType dtype,
     SpyreTensorLayout device_layout,
-    std::optional<c10::Device> device_opt = std::nullopt);
+    std::optional<c10::Device> device_opt = std::nullopt,
+    std::optional<std::map<int64_t, ReservedDimInfo>> reserved_dims =
+        std::nullopt);
 
 /**
  * Allocate a Spyre tensor whose logical size/stride are `size`/`stride`
