@@ -40,6 +40,7 @@ from .pass_counters import COUNTERS
 from .provenance import SpyreGraphTransformObserver, reset_provenance_warnings
 
 from .padding import insert_bmm_padding, insert_restickify_padding
+from .reserved_dims_contract import apply_reserved_dims_contract
 from .temp_passes import (
     bmm_unflatten_pass,
     decompose_addmm,
@@ -454,6 +455,11 @@ class CustomPreSchedulingPasses:
 
     def __init__(self):
         self.passes = [
+            #
+            # Cross-kernel contract: copy each input's reserved_dims
+            # (min, max, granularity) into this compile's ShapeEnv. Must run
+            # first so every later pass that reads bounds sees the real range.
+            apply_reserved_dims_contract,
             #
             # Convert for_each_tile WhileLoops bodies into inlined IR with loop_infos
             splice_while_loops,
