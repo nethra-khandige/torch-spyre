@@ -295,6 +295,17 @@ class SpyreTensorImpl : public at::TensorImpl {
    */
   std::map<int64_t, ReservedDimInfo> reserved_dims;
 
+  /**
+   * True if this tensor has a reservation AND is still the tensor it was
+   * allocated as. reserved_dims keys are absolute dim indices, so they only
+   * mean something while the axes are unchanged. dma_sizes/dma_strides are
+   * set at allocation and on every spyre_resize_, but in-place metadata ops
+   * (t_, transpose_, squeeze_, unsqueeze_, as_strided_) change
+   * sizes()/strides() without touching them. A mismatch therefore means the
+   * map is stale, and callers must not trust it.
+   */
+  bool has_intact_reservation() const;
+
   SpyreTensorImpl(c10::Storage&& storage, c10::DispatchKeySet key_set,
                   const caffe2::TypeMeta& dtype);
 

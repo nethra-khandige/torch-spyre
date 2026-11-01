@@ -34,13 +34,6 @@ if TYPE_CHECKING:
 # this module's patch functions actually run).
 _UNSET = object()
 
-# Floor on a dynamic= reservation's `min`. The serving plugin's linear
-# wrapper branches on a row count below this, which would become a branch
-# on a symbol once that dim is dynamic. Real minima are far above it
-# today, so this holds by luck rather than by construction -- enforcing it
-# here means a future caller can't quietly drop below it.
-_MIN_RESERVED_DIM_SIZE = 8
-
 _DynamicSpec = namedtuple("_DynamicSpec", "dim min max granularity")
 
 _DYNAMIC_SPEC_KEYS = frozenset({"min", "max", "granularity"})
@@ -58,8 +51,9 @@ def _parse_dynamic_spec(dynamic, size) -> _DynamicSpec:
     the current (warmup) shape, so a later in-place resize up to `max`
     (done by the compiled graph via aten::resize_ / spyre_resize_) never
     reallocates and never changes the SpyreTensorLayout the recompile
-    guard compares against. Scope for now: exactly one dim (dim 0 comes
-    first) -- multi-dim reservation is a later layer. `granularity` is
+    guard compares against. Scope for now: exactly one dim, and it must be
+    dim 0 (the native allocator rejects any other) -- reserving other or
+    several dims is a later layer. `granularity` is
     optional; omitting it means "no step restriction" (equivalent to
     granularity=1).
 
@@ -75,7 +69,8 @@ def _parse_dynamic_spec(dynamic, size) -> _DynamicSpec:
     original_dim = dim  # for messages: report what the caller wrote, not
     # the canonicalized index, if canonicalizing still leaves it invalid.
 
-    if not isinstance(dim, int):
+    # bool is a subclass of int, so True would otherwise pass as dim=1.
+    if not isinstance(dim, int) or isinstance(dim, bool):
         raise ValueError(f"dynamic={{...}}: dim={dim!r} must be an int")
 
     unknown = set(spec) - _DYNAMIC_SPEC_KEYS
@@ -107,7 +102,7 @@ def _parse_dynamic_spec(dynamic, size) -> _DynamicSpec:
         ("max", dim_max),
         ("granularity", granularity),
     ):
-        if not isinstance(value, int) or value <= 0:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(
                 f"dynamic={{{dim}: ...}}: {name}={value!r} must be a positive int"
             )
@@ -118,18 +113,20 @@ def _parse_dynamic_spec(dynamic, size) -> _DynamicSpec:
             f"dynamic={{{dim}: ...}}: max={dim_max} is not a multiple of "
             f"granularity={granularity}"
         )
-    if dim_min < _MIN_RESERVED_DIM_SIZE:
-        raise ValueError(
-            f"dynamic={{{dim}: ...}}: min={dim_min} is below the minimum "
-            f"supported reservation floor ({_MIN_RESERVED_DIM_SIZE})"
-        )
 
     # Local import: this file must stay importable before torch_spyre's
     # own submodules are guaranteed ready (see _UNSET above), and reading
     # the Inductor layer's config from the eager transfer path is itself
     # a deliberate dependency edge -- a single source of truth for
-    # max_buckets beats a duplicated constant that can drift from it.
+    # max_buckets and min_reserved_dim_size beats duplicated constants that
+    # can drift from it.
     from torch_spyre._inductor import config as inductor_config
+
+    if dim_min < inductor_config.min_reserved_dim_size:
+        raise ValueError(
+            f"dynamic={{{dim}: ...}}: min={dim_min} is below the minimum "
+            f"supported reservation floor ({inductor_config.min_reserved_dim_size})"
+        )
 
     num_buckets = dim_max // granularity
     if num_buckets > inductor_config.max_buckets:
@@ -159,16 +156,20 @@ def _parse_dynamic_spec(dynamic, size) -> _DynamicSpec:
     return _DynamicSpec(dim=dim, min=dim_min, max=dim_max, granularity=granularity)
 
 
-def _require_cpu_to_spyre(self, args, kwargs) -> None:
-    """Raise unless this call is an eager CPU -> "spyre" transfer.
+def _parse_dynamic_to_args(self, args, kwargs):
+    """Validate a ``.to(..., dynamic=...)`` call and return its target dtype.
 
-    dynamic= only makes sense for the initial host-to-device copy.
+    dynamic= only makes sense for the initial host-to-device copy, so raise
+    unless this is an eager CPU -> "spyre" transfer. The returned dtype is
+    None when the caller didn't ask for a conversion. Parsed with torch's own
+    ``.to()`` parser so dtype is honoured whether it is passed positionally or
+    by keyword; options this path can't honour are rejected, not ignored.
     """
     import torch
 
-    device = kwargs.get("device", None)
-    if device is None and len(args) > 0 and isinstance(args[0], (str, torch.device)):
-        device = args[0]
+    device, dtype, _non_blocking, memory_format = torch._C._nn._parse_to(
+        *args, **kwargs
+    )
     message = (
         'dynamic= is only supported for CPU -> "spyre" transfers, e.g. '
         f"{_DYNAMIC_USAGE_HINT}"
@@ -177,6 +178,14 @@ def _require_cpu_to_spyre(self, args, kwargs) -> None:
         raise ValueError(message)
     if self.device.type != "cpu":
         raise ValueError(message)
+    # The buffer keeps the source's strides, so only the default memory
+    # formats are meaningful here.
+    if memory_format not in (None, torch.preserve_format, torch.contiguous_format):
+        raise ValueError(
+            f"dynamic= does not support memory_format={memory_format}; "
+            "only the default memory format is supported"
+        )
+    return dtype
 
 
 def _transfer_reserved(src, spec: _DynamicSpec) -> "torch.Tensor":
@@ -327,8 +336,17 @@ def _patch_tensor_for_spyre():
 
     def spyre_to(self, *args, device_layout=None, dynamic=None, **kwargs):
         if dynamic is not None:
-            _require_cpu_to_spyre(self, args, kwargs)
-            return _transfer_reserved(self, _parse_dynamic_spec(dynamic, self.size()))
+            if device_layout is not None:
+                raise ValueError(
+                    "dynamic= cannot be combined with device_layout=: a "
+                    "reserved tensor's layout is derived from its max size"
+                )
+            dtype = _parse_dynamic_to_args(self, args, kwargs)
+            spec = _parse_dynamic_spec(dynamic, self.size())
+            # Convert on the host first: the reserved buffer is allocated
+            # and filled at the dtype the caller asked for.
+            src = self if dtype is None or dtype == self.dtype else orig_to(self, dtype)
+            return _transfer_reserved(src, spec)
         if device_layout is None:
             # During Dynamo tracing this wrapper is an allow_in_graph leaf: keep
             # the operation device-local so Inductor sees and lowers the dtype

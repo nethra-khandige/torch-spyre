@@ -18,6 +18,7 @@
 
 #include <c10/core/DispatchKey.h>
 #include <c10/core/DispatchKeySet.h>
+#include <c10/util/safe_numerics.h>
 #include <util/sendefs/dataType.h>
 
 #include <algorithm>
@@ -308,7 +309,13 @@ uint64_t get_device_size_in_bytes(const std::vector<int64_t>& device_size,
               static_cast<int>(device_dtype));
   uint64_t size_bytes = (elems * bits + 7) / 8;
   for (int i = static_cast<int>(device_size.size()) - 2; i >= 0; i--) {
-    size_bytes *= device_size[i];
+    // A wrapped product would size an allocation far smaller than the shape
+    // it must hold, so fail instead of returning it.
+    TORCH_CHECK(
+        device_size[i] >= 0 &&
+            !c10::mul_overflows(
+                size_bytes, static_cast<uint64_t>(device_size[i]), &size_bytes),
+        "Device size calculation overflowed for device_size=", device_size);
   }
   return size_bytes;
 }
@@ -355,13 +362,19 @@ std::vector<int64_t> get_spyre_tensor_strides(const at::Tensor& tensor) {
   TORCH_CHECK(false, "Error: Device tensor does not have SpyreTensorImpl");
 }
 
+bool SpyreTensorImpl::has_intact_reservation() const {
+  return !reserved_dims.empty() && storage_offset() == 0 &&
+         sizes() == c10::IntArrayRef(dma_sizes) &&
+         strides() == c10::IntArrayRef(dma_strides);
+}
+
 std::optional<std::map<int64_t, ReservedDimInfo>> get_reserved_dims(
     const at::Tensor& tensor) {
   if (!tensor.is_privateuseone()) {
     return std::nullopt;
   }
   auto* impl = dynamic_cast<SpyreTensorImpl*>(tensor.unsafeGetTensorImpl());
-  if (impl == nullptr || impl->reserved_dims.empty()) {
+  if (impl == nullptr || !impl->has_intact_reservation()) {
     return std::nullopt;
   }
   return impl->reserved_dims;

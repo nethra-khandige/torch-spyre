@@ -28,7 +28,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_spyre  # noqa: F401
-from torch_spyre._C import get_spyre_tensor_layout
+from torch_spyre._C import get_reserved_dims, get_spyre_tensor_layout
 
 DEVICE = torch.device("spyre")
 
@@ -100,6 +100,27 @@ class TestReservationResizeGuard(TestCase):
         with self.assertRaisesRegex(RuntimeError, "must keep the same rank"):
             self.x_dev.resize_((1024,))
 
+    def test_resize_after_in_place_transpose_rejected(self) -> None:
+        # t_() swaps the axes but leaves the reservation's dim index alone,
+        # so resize_ would validate the wrong axis. It must refuse.
+        d = self.x_dev.detach()
+        d.t_()
+        with self.assertRaisesRegex(RuntimeError, "changed in place"):
+            d.resize_((1024, 140))
+
+    def test_resize_after_in_place_rank_change_rejected(self) -> None:
+        d = self.x_dev.detach()
+        d.unsqueeze_(0)
+        with self.assertRaisesRegex(RuntimeError, "changed in place"):
+            d.resize_((1, DIM_MAX, 1024))
+
+    def test_resize_after_valid_resize_still_allowed(self) -> None:
+        # resize_ itself rewrites the shape; that must not look like an
+        # in-place reshape to the check above.
+        self.x_dev.resize_((140, 1024))
+        self.x_dev.resize_((DIM_MAX, 1024))
+        self.assertEqual(self.x_dev.size(0), DIM_MAX)
+
     def test_innermost_dim_reservation_rejected(self) -> None:
         # Reserving the innermost (stick) dimension is out of scope today:
         # padding it changes the device stride for every outer dimension,
@@ -140,6 +161,70 @@ class TestReservationResizeGuard(TestCase):
         self.assertTrue(
             torch.allclose(self.x_dev.cpu()[:140], original[:140], atol=1e-3)
         )
+
+
+class TestReservationBoundaries(TestCase):
+    """Edges of the declared range, away from the 70..630 / step-70 case."""
+
+    def test_min_equals_max_allows_only_that_size(self) -> None:
+        x = torch.rand(560, 1024, dtype=torch.float16)
+        # granularity must be explicit: the default of 1 would mean 560
+        # buckets, over the cap of 32.
+        spec = {"min": 560, "max": 560, "granularity": 560}
+        x_dev = x.to(DEVICE, dynamic={0: spec})
+        self.assertEqual(get_reserved_dims(x_dev), {0: spec})
+        x_dev.resize_((560, 1024))  # the one legal size: a no-op
+        self.assertEqual(x_dev.size(0), 560)
+        with self.assertRaisesRegex(RuntimeError, "outside the reservation"):
+            x_dev.resize_((280, 1024))
+
+    def test_granularity_one_accepts_odd_sizes(self) -> None:
+        # max / granularity must stay within the bucket cap, so with
+        # granularity=1 the ceiling is small.
+        x = torch.rand(16, 1024, dtype=torch.float16)
+        x_dev = x.to(DEVICE, dynamic={0: {"min": 8, "max": 32, "granularity": 1}})
+        before = x_dev.untyped_storage().data_ptr()
+        x_dev.resize_((9, 1024))  # shrink to an odd size
+        self.assertEqual(x_dev.size(0), 9)
+        x_dev.resize_((31, 1024))  # grow to another odd size
+        self.assertEqual(x_dev.size(0), 31)
+        self.assertEqual(x_dev.untyped_storage().data_ptr(), before)
+        with self.assertRaisesRegex(RuntimeError, "outside the reservation"):
+            x_dev.resize_((7, 1024))  # below min
+        with self.assertRaisesRegex(RuntimeError, "outside the reservation"):
+            x_dev.resize_((33, 1024))  # above max
+
+    def test_omitted_granularity_equals_one(self) -> None:
+        x = torch.rand(16, 1024, dtype=torch.float16)
+        omitted = x.to(DEVICE, dynamic={0: {"min": 8, "max": 32}})
+        explicit = x.to(DEVICE, dynamic={0: {"min": 8, "max": 32, "granularity": 1}})
+        self.assertEqual(get_reserved_dims(omitted), get_reserved_dims(explicit))
+
+    def test_non_leading_dim_reservation_rejected(self) -> None:
+        # Padding a middle dim changes the host stride of every dim outside
+        # it (here dim 0: 560*1024 -> 630*1024), so the layout's stride_map
+        # would disagree with the real data's strides and the H2D copy could
+        # write past the buffer. Must be refused up front, not attempted.
+        x = torch.rand(4, 560, 1024, dtype=torch.float16)
+        with self.assertRaisesRegex(RuntimeError, "only dim 0"):
+            x.to(DEVICE, dynamic={1: {"min": 70, "max": 630, "granularity": 70}})
+
+    def test_leading_dim_of_3d_tensor_stays_in_place(self) -> None:
+        # The supported case on a rank-3 tensor: reserve dim 0. Inner strides
+        # do not depend on it, so the buffer and layout stay put.
+        x = torch.rand(560, 4, 1024, dtype=torch.float16)
+        x_dev = x.to(DEVICE, dynamic={0: {"min": 70, "max": 630, "granularity": 70}})
+        ptr = x_dev.untyped_storage().data_ptr()
+        layout = str(get_spyre_tensor_layout(x_dev))
+
+        x_dev.resize_((140, 4, 1024))
+        self.assertEqual(x_dev.stride(), (4 * 1024, 1024, 1))
+        self.assertEqual(x_dev.untyped_storage().data_ptr(), ptr)
+        self.assertEqual(str(get_spyre_tensor_layout(x_dev)), layout)
+
+        x_dev.resize_((DIM_MAX, 4, 1024))
+        self.assertEqual(x_dev.untyped_storage().data_ptr(), ptr)
+        self.assertEqual(str(get_spyre_tensor_layout(x_dev)), layout)
 
 
 if __name__ == "__main__":

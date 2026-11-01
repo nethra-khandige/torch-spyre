@@ -52,7 +52,9 @@ at::Tensor spyre_empty_with_layout(
 /**
  * Allocate a Spyre tensor whose logical size/stride are `size`/`stride`
  * (i.e. what PyTorch sees) but whose physical layout and storage are sized
- * as if dimension `dim` were `max_size`. This lets a single allocation
+ * as if dimension `dim` were `max_size`. Only `dim == 0` is supported (and
+ * never the innermost/stick dimension): padding any other dimension changes
+ * the host stride of the dimensions outside it. This lets a single allocation
  * absorb any later in-place resize of `dim` up to `max_size` (see
  * spyre_resize_) without reallocating or changing the SpyreTensorLayout
  * that recompile guards compare against. `min_size`/`granularity` are

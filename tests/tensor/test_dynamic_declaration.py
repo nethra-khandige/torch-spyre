@@ -26,7 +26,11 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 import torch_spyre  # noqa: F401
-from torch_spyre._C import get_reserved_dims
+from torch_spyre._C import (
+    get_reserved_dims,
+    spyre_empty_reserved,
+    SpyreTensorLayout,
+)
 from torch_spyre._inductor import config as inductor_config
 
 DEVICE = torch.device("spyre")
@@ -118,6 +122,72 @@ class TestDynamicDeclarationValidation(TestCase):
     def test_non_int_dim_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be an int"):
             self.x.to(DEVICE, dynamic={0.5: {"min": 70, "max": 630}})
+
+    def test_bool_value_rejected(self) -> None:
+        # bool subclasses int, so True would otherwise pass as 1.
+        for spec in (
+            {"min": 56, "max": 616, "granularity": True},
+            {"min": True, "max": 616, "granularity": 8},
+            {"min": 56, "max": True, "granularity": 8},
+        ):
+            self._assert_rejected(spec, "positive int")
+
+    def test_dtype_kwarg_honoured(self) -> None:
+        # dynamic= must not swallow the other .to() arguments: the buffer
+        # has to come out at the requested dtype, not the source's.
+        x32 = torch.rand(560, 1024, dtype=torch.float32)
+        spec = {"min": 70, "max": 630, "granularity": 70}
+        x_dev = x32.to(DEVICE, dtype=torch.float16, dynamic={0: spec})
+        self.assertEqual(x_dev.dtype, torch.float16)
+        self.assertEqual(x_dev.shape, x32.shape)
+        self.assertEqual(get_reserved_dims(x_dev), {0: spec})
+
+    def test_dtype_positional_honoured(self) -> None:
+        x32 = torch.rand(560, 1024, dtype=torch.float32)
+        x_dev = x32.to(
+            DEVICE,
+            torch.float16,
+            dynamic={0: {"min": 70, "max": 630, "granularity": 70}},
+        )
+        self.assertEqual(x_dev.dtype, torch.float16)
+
+    def test_dtype_only_without_device_rejected(self) -> None:
+        # No device given: not a CPU -> spyre transfer, so it must raise
+        # rather than quietly do something else.
+        with self.assertRaisesRegex(ValueError, "only supported for CPU"):
+            self.x.to(
+                dtype=torch.float32,
+                dynamic={0: {"min": 70, "max": 630, "granularity": 70}},
+            )
+
+    def test_unsupported_memory_format_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "memory_format"):
+            self.x.to(
+                DEVICE,
+                memory_format=torch.channels_last,
+                dynamic={0: {"min": 70, "max": 630, "granularity": 70}},
+            )
+
+    def test_huge_max_overflow_rejected(self) -> None:
+        # Calls the native entry point directly: the Python wrapper keeps
+        # max within ~32x the real size, but spyre_empty_reserved is public
+        # and must not let a wrapped byte count undersize the reservation.
+        with self.assertRaisesRegex(RuntimeError, "overflow"):
+            spyre_empty_reserved((560, 1024), (1024, 1), torch.float16, 0, 70, 2**62, 2)
+
+    def test_device_layout_with_dynamic_rejected(self) -> None:
+        # An explicit layout would be silently ignored otherwise.
+        stl = SpyreTensorLayout((560, 1024), torch.float16)
+        with self.assertRaisesRegex(ValueError, "device_layout"):
+            self.x.to(
+                DEVICE,
+                device_layout=stl,
+                dynamic={0: {"min": 70, "max": 630, "granularity": 70}},
+            )
+
+    def test_bool_dim_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an int"):
+            self.x.to(DEVICE, dynamic={True: {"min": 70, "max": 630}})
 
 
 if __name__ == "__main__":

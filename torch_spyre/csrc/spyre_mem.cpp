@@ -1019,10 +1019,16 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
  * `dim` rather than for `size[dim]` itself. `size`/`stride` remain the
  * tensor's logical (PyTorch-visible) shape; only the SpyreTensorLayout and
  * the underlying storage are computed against the padded shape. Because
- * padding a non-stick dimension does not change stride_map (see
+ * padding dim 0 (the outermost dimension) does not change stride_map (see
  * SpyreTensorLayout::init), dma_sizes/dma_strides stay at the real shape:
  * only the real data is ever transferred, into the front of the larger
  * buffer.
+ *
+ * Only dim 0 is supported. Padding any other non-stick dimension changes the
+ * host stride of every dimension outside it, so stride_map (built from the
+ * padded shape) would disagree with dma_strides (the real shape) and the
+ * host-to-device copy would place data at the wrong offsets and can write
+ * past the buffer. spyre_empty_reserved() rejects such a `dim`.
  */
 at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
                                 c10::ScalarType dtype, int64_t dim,
@@ -1055,15 +1061,24 @@ at::Tensor spyre_empty_reserved(c10::IntArrayRef size, c10::IntArrayRef stride,
               ": padding a stick dimension changes stride_map for every "
               "outer dimension, unlike a batch/outer dimension, so the "
               "DMA/guard logic implemented here does not apply");
+  TORCH_CHECK(dim == 0,
+              "tensor.to(\"spyre\", dynamic={dim: {...}}) does not yet "
+              "support reserving dim ",
+              dim,
+              ": only dim 0 (the outermost dimension) is supported. Padding "
+              "any other dimension changes the host stride of every "
+              "dimension outside it, which the host-to-device copy does not "
+              "handle");
 
   auto padded_size = size.vec();
   padded_size[dim] = max_size;
   auto device_layout = SpyreTensorLayout(padded_size, dtype);
 
   size_t device_size_bytes = get_device_size_in_bytes(device_layout);
-  int64_t cpu_numel = std::accumulate(size.begin(), size.end(), 1LL,
-                                      std::multiplies<int64_t>());
-  size_t cpu_size_bytes = cpu_numel * c10::elementSize(dtype);
+  // Overflow-checked (throws), unlike a bare accumulate: a huge `max` must
+  // not wrap size_bytes small and undersize the reservation.
+  size_t cpu_size_bytes =
+      at::detail::computeStorageNbytesContiguous(size, c10::elementSize(dtype));
   size_t size_bytes = std::max(device_size_bytes, cpu_size_bytes);
 
   c10::Device device =
@@ -1369,6 +1384,19 @@ const at::Tensor& spyre_resize_(
   //      resizing never forces a spurious recompile.
   std::vector<int64_t> layout_size = size_int.vec();
   if (!self_impl->reserved_dims.empty()) {
+    // reserved_dims keys are absolute dim indices. If the shape, strides or
+    // offset were changed in place since allocation (t_, squeeze_,
+    // as_strided_, ...), a key can name a different axis than it did, and
+    // every check below would validate the wrong dimension. Fail rather than
+    // trust it; falling through as "unreserved" would reallocate instead.
+    TORCH_CHECK(self_impl->has_intact_reservation(),
+                "resize_ on a max-reserved Spyre tensor: its shape, strides "
+                "or storage offset were changed in place after allocation "
+                "(e.g. t_(), transpose_(), squeeze_(), as_strided_()), so the "
+                "reservation no longer refers to the same axis. current "
+                "shape=",
+                self.sizes(), ", shape at allocation=",
+                c10::IntArrayRef(self_impl->dma_sizes));
     // Scope today: at most one entry, so this loop runs once; the guard is
     // already written per-dim so a later second entry needs no changes here.
     for (const auto& [rdim, info] : self_impl->reserved_dims) {
@@ -1384,6 +1412,11 @@ const at::Tensor& spyre_resize_(
                   ", max=", info.max,
                   ") must keep the same rank; current shape=", self.sizes(),
                   ", requested shape=", size_int);
+      // Explicit bound before size_int[rdim] below: the rank check above
+      // only says size_int matches self, not that rdim is a valid index.
+      TORCH_CHECK(rdim >= 0 && rdim < static_cast<int64_t>(size_int.size()),
+                  "resize_ on a max-reserved Spyre tensor: reserved dim ", rdim,
+                  " is out of range for requested shape=", size_int);
       for (int64_t d = 0; d < static_cast<int64_t>(size_int.size()); d++) {
         if (d == rdim) continue;
         TORCH_CHECK(size_int[d] == self.sizes()[d],
