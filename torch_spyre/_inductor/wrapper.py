@@ -28,6 +28,7 @@ from torch._inductor.sizevars import SizeVarAllocator
 
 from .errors import Unsupported
 from .ir import FixedTiledLayout
+from .reserved_dims_contract import output_reserved_dims
 
 
 class _SpyreWrapperCodegenMixin(PythonWrapperCodegen):
@@ -66,10 +67,18 @@ class _SpyreWrapperCodegenMixin(PythonWrapperCodegen):
             f"{codegen_stride_tuple}, "
             f"{layout.dtype}, "
             f"{layout.device_layout!r}, "
-            f"device=torch.device('{layout.device}'))"
+            f"device=torch.device('{layout.device}')"
         )
 
-        return out
+        # Attach the output's (min, max, granularity) to the tensor, so a later
+        # compile that takes it as an input can read it back (see
+        # apply_reserved_dims_contract).
+        if name in V.graph.get_output_names():
+            reserved = output_reserved_dims(V.graph, tuple(layout.size))
+            if reserved:
+                out += f", reserved_dims={reserved!r}"
+
+        return out + ")"
 
     def generate_const_tensor_fallback(self, node):
         value = node.constant_args[0]
