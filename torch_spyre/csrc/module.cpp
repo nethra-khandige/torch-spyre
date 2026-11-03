@@ -35,6 +35,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -626,9 +627,32 @@ PYBIND11_MODULE(_C, m) {
             }
           }));
 
-  m.def("spyre_empty_with_layout", &spyre::spyre_empty_with_layout,
-        py::arg("size"), py::arg("stride"), py::arg("dtype"),
-        py::arg("device_layout"), py::arg("device") = py::none());
+  m.def(
+      "spyre_empty_with_layout",
+      [](c10::IntArrayRef size, c10::IntArrayRef stride, c10::ScalarType dtype,
+         spyre::SpyreTensorLayout device_layout,
+         std::optional<c10::Device> device,
+         std::optional<std::map<int64_t, std::tuple<int64_t, int64_t, int64_t>>>
+             reserved_dims) {
+        // Python passes {dim: (min, max, granularity)}; convert it to
+        // ReservedDimInfo. get_reserved_dims does the reverse conversion.
+        std::optional<std::map<int64_t, spyre::ReservedDimInfo>> typed;
+        if (reserved_dims.has_value()) {
+          typed.emplace();
+          for (const auto& [dim, t] : *reserved_dims) {
+            (*typed)[dim] = spyre::ReservedDimInfo{
+                std::get<0>(t), std::get<1>(t), std::get<2>(t)};
+          }
+        }
+        return spyre::spyre_empty_with_layout(size, stride, dtype,
+                                              device_layout, device, typed);
+      },
+      py::arg("size"), py::arg("stride"), py::arg("dtype"),
+      py::arg("device_layout"), py::arg("device") = py::none(),
+      py::arg("reserved_dims") = py::none(),
+      "Allocate a Spyre tensor with an explicit device layout. If "
+      "`reserved_dims` ({dim: (min, max, granularity)}) is given it is "
+      "stamped on the tensor so get_reserved_dims() returns it.");
   m.def("empty_with_layout", &spyre::py_empty_with_layout);
   m.def("as_strided_with_layout", &spyre::as_strided_with_layout);
   m.def("reinterpret_tensor", &spyre::reinterpret_tensor);
